@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
   [switch]$InstallDependencies,
-  [switch]$RegisterTask
+  [switch]$RegisterTask,
+  [switch]$EnableExecution
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
@@ -10,6 +11,7 @@ $pythonPath = Join-Path $root '.venv\Scripts\python.exe'
 if (-not $InstallDependencies -and -not $RegisterTask) {
   throw 'Choose -InstallDependencies, -RegisterTask, or both. Run Setup-LocalConfig.ps1 and Setup-RouterConfig.ps1 separately.'
 }
+if ($EnableExecution -and -not $RegisterTask) { throw '-EnableExecution requires -RegisterTask.' }
 
 if ($InstallDependencies) {
   if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
@@ -33,9 +35,11 @@ if ($RegisterTask) {
   }
   $wrapper = Join-Path $root 'scripts\RouterWatchdog.vbs'
   $runAs = "$env:USERDOMAIN\$env:USERNAME"
-  schtasks.exe /Create /TN 'ZenWiFiMonitor' /TR ('wscript.exe "' + $wrapper + '"') /SC MINUTE /MO 5 /RU $runAs /IT /F | Out-Host
+  $executionArgument = if ($EnableExecution) { ' --execute' } else { '' }
+  schtasks.exe /Create /TN 'ZenWiFiMonitor' /TR ('wscript.exe "' + $wrapper + '"' + $executionArgument) /SC MINUTE /MO 5 /RU $runAs /IT /F | Out-Host
   if ($LASTEXITCODE -ne 0) { throw 'Windows Task Scheduler registration failed.' }
   [xml]$taskXml = schtasks.exe /Query /TN 'ZenWiFiMonitor' /XML
   if ($taskXml.Task.Principals.Principal.LogonType -ne 'InteractiveToken') { throw 'The registered task is not configured for the interactive Windows user.' }
-  Write-Host 'The silent five-minute task is registered. It remains dry-run until separately activated.'
+  if ($EnableExecution) { Write-Warning 'The task now passes --execute. Router restart remains gated by config.local.json execution_mode.' }
+  else { Write-Host 'The silent five-minute task is registered. It remains dry-run until separately activated.' }
 }
