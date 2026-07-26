@@ -1,0 +1,14 @@
+{
+  "paths": {
+    "log_directory": "<absolute local log directory>",
+    "state_database": "<absolute local SQLite database path>"
+  },
+  "router": { "host": "<router IP address or hostname>", "management_port": 8443, "use_tls": true, "model": "<router model>" },
+  "monitor": {
+    "failure_minutes_before_reboot": 15,
+    "reboot_cooldown_minutes": 30,
+    "probe_urls": ["https://www.msftconnecttest.com/connecttest.txt", "https://www.cloudflare.com/cdn-cgi/trace"]
+  },
+  "notion": { "enabled": false, "data_source_id": "<Notion data source ID>", "api_version": "2026-03-11" },
+  "execution_mode": "dry-run"
+}

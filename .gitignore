@@ -1,0 +1,26 @@
+# Secrets and machine-specific configuration
+config.local
+config.local.json
+config.local.json.*
+_public/
+.env
+*.secret
+
+# Local runtime state and logs
+.venv/
+__pycache__/
+*.pyc
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.log
+runtime/
+logs/
+
+# Editor and OS files
+.vscode/
+.idea/
+venv/
+Thumbs.db
+.DS_Store
