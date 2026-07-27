@@ -12,7 +12,8 @@
 5. Results and state are stored atomically on the local log disk.
 6. After 15 continuous failure minutes, the monitor establishes an authenticated router session and at most one router restart occurs per cooldown window when `--execute` and standing authorization apply. The session is closed afterwards.
 7. After a successful monitor-initiated restart, the next confirmed online result shows a persistent local recovery notification.
-8. When explicitly enabled, each relevant event is also logged in Notion with data minimization. SQLite remains the primary log.
+8. Every relevant event is committed to SQLite first. When Notion is enabled and the run is authorized, the outbox delivers undelivered events oldest first, marks each delivered only after a successful response, and stops on the first failure. SQLite remains the primary log.
+9. A separate fifteen-minute health task inspects run freshness, database readability, the bootstrap error log and the outbox backlog, and raises a persistent notification only when the state becomes unhealthy or escalates.
 
 ## Components
 
@@ -23,4 +24,6 @@
 | VBS wrapper | Silent background execution for every scheduled job; selects the target with `--script=` and forwards `--execute` | None |
 | Windows Credential Manager | Passwords and Notion token | Secrets |
 | Notion (optional) | Remote log of minimized events when enabled | Operations status |
+| Notion outbox | Durable SQLite delivery queue with bounded retries, retention and sanitized error detail | Operations status, no secrets |
+| Health monitor | Standard-library-only observer on its own silent task; never restarts the router | Health state |
 | Version marking | Single project version in `VERSION`, mirrored into every tracked file and verified by `scripts/check_versions.py` | No operational data |
