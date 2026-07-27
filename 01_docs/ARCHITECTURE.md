@@ -23,7 +23,7 @@
 | Python/AsusRouter adapter | Authenticated router restart through the pinned [asusrouter](https://github.com/Vaskivskyi/asusrouter) dependency | Router secret, not logged |
 | VBS wrapper | Silent background execution for every scheduled job; selects the target with `--script=` and forwards `--execute` | None |
 | Windows Credential Manager | Passwords and Notion token | Secrets |
-| Notion (optional) | Remote log of minimized events when enabled | Operations status |
+| Notion (optional) | Remote log of status, action and technical error detail when enabled | Operations status; error text may include the router endpoint; never credentials |
 | Notion outbox | Durable SQLite delivery queue with bounded retries, retention and sanitized error detail | Operations status, no secrets |
 | Health monitor | Standard-library-only observer on its own silent task; never restarts the router | Health state |
 | Version marking | Single project version in `VERSION`, mirrored into every tracked file and verified by `scripts/check_versions.py` | No operational data |

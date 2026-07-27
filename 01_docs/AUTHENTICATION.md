@@ -18,6 +18,7 @@ The scheduled task must use **Run only when user is logged on**. The selected us
 - No secrets in Git, configuration, SQLite, local logs, or Notion.
 - No fallback to `.env`, environment variables, or text files for secrets.
 - No secret in Task Scheduler arguments.
+- Technical error detail sent to Notion is not content-minimized and can include the router endpoint. Credentials are still excluded; see ADR-014 before pointing this project at a shared Notion database.
 
 ## Operating rule
 

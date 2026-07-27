@@ -9,7 +9,7 @@
 | Source code and documentation | Monitoring logic, configuration templates, and operating instructions | Internal | Project owner and authorized maintainers |
 | Local operations log | UTC time, probe outcome, action type, and technical errors | Internal operations data | Local Windows account running the job |
 | Secrets | Router account and Notion token | Confidential | Windows Credential Manager for the run identity only |
-| Notion log (optional) | Minimized status and restart events, no secrets | Internal operations data | Shared Notion data source when enabled |
+| Notion log (optional) | Status, action and technical error detail; error text may include the router endpoint and other environment data; never credentials | Internal operations data | The configured Notion data source when enabled, private to the owner's integration |
 
 ## Purpose
 
