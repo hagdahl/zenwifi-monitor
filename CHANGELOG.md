@@ -30,6 +30,7 @@
 - Added a history-free `_public` staging workflow for public GitHub publication.
 - Added a persistent local notification when Internet connectivity is confirmed after a monitor-initiated router restart.
 - Added the explicit `-EnableExecution` task-registration gate and recorded the production-activation decision model.
+- Added a documented plan for durable Notion delivery, local health monitoring, dependency locking, and Debian support.
 - Hardened Windows PowerShell compatibility, configuration validation, task registration, TLS setup messaging, CI permissions, and bootstrap-failure documentation after independent review.
 
 ### Rollback
