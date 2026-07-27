@@ -41,6 +41,7 @@ if ($RegisterTask) {
   if ($LASTEXITCODE -ne 0) { throw 'Windows Task Scheduler registration failed.' }
   [xml]$taskXml = schtasks.exe /Query /TN 'ZenWiFiMonitor' /XML
   if ($taskXml.Task.Principals.Principal.LogonType -ne 'InteractiveToken') { throw 'The registered task is not configured for the interactive Windows user.' }
+  if ($taskXml.Task.Actions.Exec.Command -ne 'wscript.exe') { throw 'The registered task does not run through the silent VBS wrapper.' }
   if ($EnableExecution) { Write-Warning 'The task now passes --execute. Router restart remains gated by config.local.json execution_mode.' }
   else { Write-Host 'The silent five-minute task is registered. It remains dry-run until separately activated.' }
 }

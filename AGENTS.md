@@ -7,5 +7,6 @@ This project follows `cowork-project-instructions` as its governing work standar
 - No secrets in the repository, logs, or Notion.
 - Keep `dry-run` as the default and require explicit `--execute` for external writes or router restart.
 - Update CHANGELOG, DECISIONS, ARCHITECTURE, and HANDOVER in the same logical change group.
+- Register every scheduled job through `scripts/RouterWatchdog.vbs` so it runs silently; never register an interpreter directly.
 - Keep the project version in `VERSION` and every file marker in step; run `python scripts/check_versions.py` before reporting completion.
 - Verify Windows Task Scheduler in its actual run context before reporting completion.

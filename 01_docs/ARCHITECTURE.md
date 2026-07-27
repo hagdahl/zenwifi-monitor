@@ -4,7 +4,7 @@
 
 ## Flow
 
-1. A scheduled Windows task starts a hidden VBS wrapper every five minutes.
+1. A scheduled Windows task starts the hidden VBS wrapper every five minutes. Every scheduled job of this project is registered through that one wrapper, so no job can raise a console window.
 2. The wrapper starts Python through an absolute path.
 3. The monitor reads `config.local.json` and retrieves secrets from Credential Manager.
    Older local configurations are migrated by a separate, dry-run-first script that preserves a local backup and does not access external systems.
@@ -20,7 +20,7 @@
 |---|---|---|
 | Python monitor | Orchestration, probes, decisions, local log | Operations status |
 | Python/AsusRouter adapter | Authenticated router restart through the pinned [asusrouter](https://github.com/Vaskivskyi/asusrouter) dependency | Router secret, not logged |
-| VBS wrapper | Silent background execution | None |
+| VBS wrapper | Silent background execution for every scheduled job; selects the target with `--script=` and forwards `--execute` | None |
 | Windows Credential Manager | Passwords and Notion token | Secrets |
 | Notion (optional) | Remote log of minimized events when enabled | Operations status |
 | Version marking | Single project version in `VERSION`, mirrored into every tracked file and verified by `scripts/check_versions.py` | No operational data |

@@ -11,7 +11,7 @@
 
 ## External dependencies
 
-- Windows Task Scheduler targets a VBS launcher through an absolute path.
+- Windows Task Scheduler targets `scripts/RouterWatchdog.vbs` through an absolute path. Every scheduled job of this project shall be registered through that wrapper; pass `--script=<path relative to the project root>` to point it at another entry point. `Install.ps1 -RegisterTask` fails if the registered action is not `wscript.exe`.
 - The Python environment is project-local and must be referenced by absolute path.
 - The Notion integration and router account are provided through Windows Credential Manager.
 - Python 3.11 with the Windows Python Launcher is a prerequisite. `Install.ps1 -InstallDependencies` creates the project-local virtual environment.

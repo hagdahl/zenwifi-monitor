@@ -139,11 +139,21 @@ def visible_recovery_notice():
     import ctypes
     ctypes.windll.user32.MessageBoxW(0, "Internet connectivity has been restored after the router restart.", "Router Watchdog", 0x40)
 
+def _notice_interpreter() -> str:
+    """Prefer the windowless interpreter so a notice never flashes a console."""
+    windowless = Path(sys.executable).with_name("pythonw.exe")
+    return str(windowless) if windowless.is_file() else sys.executable
+
+def _spawn_notice(flag: str) -> None:
+    """Start a notice in its own process without creating a console window."""
+    subprocess.Popen([_notice_interpreter(), __file__, flag], close_fds=True,
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
 def launch_reboot_notice() -> None:
-    subprocess.Popen([sys.executable, __file__, "--notice"], close_fds=True)
+    _spawn_notice("--notice")
 
 def launch_recovery_notice() -> None:
-    subprocess.Popen([sys.executable, __file__, "--recovery-notice"], close_fds=True)
+    _spawn_notice("--recovery-notice")
 
 def main() -> int:
     parser = argparse.ArgumentParser()
