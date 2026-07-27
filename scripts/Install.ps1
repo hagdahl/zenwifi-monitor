@@ -8,7 +8,17 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
-$pythonPath = Join-Path $root '.venv\Scripts\python.exe'
+# The environment lives beside the runtime state rather than in the project
+# tree. A virtual environment inside a cloud-synced directory is not durable:
+# a sync or hygiene routine can move it away, and the scheduled jobs then have
+# no interpreter. This is the same reasoning ADR-001 applies to the database
+# and the logs. The project-local location remains a fallback for development.
+$runtimePath = Join-Path $env:LOCALAPPDATA 'ZenWiFiMonitor\.venv'
+$pythonPath = Join-Path $runtimePath 'Scripts\python.exe'
+$projectPythonPath = Join-Path $root '.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $pythonPath) -and (Test-Path -LiteralPath $projectPythonPath)) {
+  $pythonPath = $projectPythonPath
+}
 
 if (-not $InstallDependencies -and -not $RegisterTask -and -not $RegisterHealthTask) {
   throw 'Choose -InstallDependencies, -RegisterTask, -RegisterHealthTask, or a combination. Run Setup-LocalConfig.ps1 and Setup-RouterConfig.ps1 separately.'
@@ -23,17 +33,24 @@ if ($InstallDependencies) {
   if ($LASTEXITCODE -ne 0) {
     throw 'Python 3.11 is required. Install it and verify with: py -3.11 --version'
   }
-  & py -3.11 -m venv (Join-Path $root '.venv')
+  & py -3.11 -m venv $runtimePath
+  $pythonPath = Join-Path $runtimePath 'Scripts\python.exe'
+  if (-not (Test-Path -LiteralPath $pythonPath)) { throw "The environment was not created at $runtimePath." }
   & $pythonPath -m pip install --upgrade pip
-  & $pythonPath -m pip install -r (Join-Path $root 'requirements.txt')
+  # --require-hashes makes pip refuse the whole file unless every distribution
+  # matches a recorded hash, so a compromised or substituted artefact fails the
+  # install instead of reaching an unattended job that can restart a router.
+  & $pythonPath -m pip install --require-hashes -r (Join-Path $root 'requirements.lock.txt')
+  if ($LASTEXITCODE -ne 0) { throw 'Hash-locked dependency installation failed.' }
   & $pythonPath -m pip check
   if ($LASTEXITCODE -ne 0) { throw 'Dependency validation failed.' }
-  Write-Host 'Python environment and pinned dependencies are ready.'
+  Write-Host "Python environment and hash-locked dependencies are ready at $runtimePath."
+
 }
 
 if ($RegisterTask) {
   if (-not (Test-Path -LiteralPath $pythonPath)) {
-    throw 'The project Python environment is missing. Run Install.ps1 -InstallDependencies first.'
+    throw 'The Python environment is missing. Run Install.ps1 -InstallDependencies first.'
   }
   $wrapper = Join-Path $root 'scripts\RouterWatchdog.vbs'
   $runAs = "$env:USERDOMAIN\$env:USERNAME"
@@ -49,7 +66,7 @@ if ($RegisterTask) {
 
 if ($RegisterHealthTask) {
   if (-not (Test-Path -LiteralPath $pythonPath)) {
-    throw 'The project Python environment is missing. Run Install.ps1 -InstallDependencies first.'
+    throw 'The Python environment is missing. Run Install.ps1 -InstallDependencies first.'
   }
   $wrapper = Join-Path $root 'scripts\RouterWatchdog.vbs'
   $runAs = "$env:USERDOMAIN\$env:USERNAME"

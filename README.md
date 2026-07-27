@@ -29,7 +29,7 @@ Project logic is stored here. Runtime logs and state are stored outside the proj
 
 This project applies the working and publication principles from [hagdahl/cowork-project-instructions](https://github.com/hagdahl/cowork-project-instructions). That repository is an inspiration and governing process reference, not a runtime dependency and not a source of router credentials or operational data.
 
-Router communication uses the open-source [Vaskivskyi/asusrouter](https://github.com/Vaskivskyi/asusrouter) library, pinned in `requirements.txt`. The monitor uses that library for authenticated ASUSWRT-compatible router communication; it does not copy or vendor the upstream project code.
+Router communication uses the open-source [Vaskivskyi/asusrouter](https://github.com/Vaskivskyi/asusrouter) library, pinned in `requirements.in` and hash-locked in `requirements.lock.txt`. The monitor uses that library for authenticated ASUSWRT-compatible router communication; it does not copy or vendor the upstream project code.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the preserved copyright notice and license handling for direct dependencies.
 
@@ -56,12 +56,12 @@ The local SQLite database is the primary operational record. Notion is optional:
 
 Open PowerShell in the project root and run these scripts under the same Windows account that will own the scheduled task:
 
-1. Run `& .\scripts\Install.ps1 -InstallDependencies`. It verifies Python 3.11, creates `.venv`, installs the pinned dependencies, and checks the installed dependency set.
+1. Run `& .\scripts\Install.ps1 -InstallDependencies`. It verifies Python 3.11, creates the environment under `%LOCALAPPDATA%\ZenWiFiMonitor\.venv`, installs the hash-locked dependencies with `--require-hashes`, and checks the installed dependency set. The environment is deliberately kept outside the project directory; see ADR-016.
 2. Run `& .\scripts\Setup-LocalConfig.ps1`. It asks where local runtime data should be stored, creates or updates `config.local.json`, and lets the user enable or skip Notion logging. The selected folder contains `logs` and the SQLite database; it is never committed to Git.
 3. If upgrading from an earlier configuration, run `& .\scripts\Migrate-LocalConfig.ps1` first. Review its dry-run plan. Run it again with `-WriteConfig` to create an ignored backup and apply the schema migration. Add `-EnableNotion` only when optional Notion logging should remain enabled.
 4. Run `& .\scripts\Setup-RouterConfig.ps1` for safe discovery. After reviewing its result, run `& .\scripts\Setup-RouterConfig.ps1 -WriteConfig` to store the router endpoint. HTTPS/TLS is the normal path. The documented HTTP exception is available only after a typed acknowledgement when TLS cannot be used.
-5. Run `.\.venv\Scripts\python.exe .\scripts\Setup-Secrets.py`. It stores router credentials in Windows Credential Manager. It asks separately whether the optional Notion token should be configured and never replaces a stored value when its prompt is left blank.
-6. Run `.\.venv\Scripts\python.exe .\04_tests\test_watchdog.py` and a dry-run monitoring invocation. Confirm the local SQLite database receives a run record. Neither step restarts the router.
+5. Run `& "$env:LOCALAPPDATA\ZenWiFiMonitor\.venv\Scripts\python.exe" .\scripts\Setup-Secrets.py`. It stores router credentials in Windows Credential Manager. It asks separately whether the optional Notion token should be configured and never replaces a stored value when its prompt is left blank.
+6. Run `& "$env:LOCALAPPDATA\ZenWiFiMonitor\.venv\Scripts\python.exe" .\04_tests\test_watchdog.py` and a dry-run monitoring invocation. Confirm the local SQLite database receives a run record. Neither step restarts the router.
 7. Run `& .\scripts\Install.ps1 -RegisterTask` only after the dry-run checks pass. It verifies that the private Python runtime exists, then creates the silent five-minute scheduled task. The task remains dry-run until a separate production decision enables execution.
 
 `Install.ps1` accepts either switch independently. It does not configure router credentials, select a data directory, enable Notion, or activate restart capability; the numbered setup steps keep those decisions explicit.
@@ -89,4 +89,4 @@ Before public release, use [01_docs/INDEPENDENT_REVIEW_PROMPT.md](01_docs/INDEPE
 
 Standing authorization exists. The registered Windows task remains intentionally blocked from router restart until the project owner explicitly approves production deployment. Tests and dry-runs must never request a router restart.
 
-`requirements.txt` contains pinned direct dependencies. Generate a fully hash-locked transitive dependency file after the first verified installation and before dependency updates. Notion logging uses the Notion REST API directly with an internal integration or personal access token in Windows Credential Manager; MCP and Pipedream are not required.
+`requirements.in` names the direct dependencies and is the only file edited by hand. `requirements.lock.txt` is the generated, fully resolved and hash-locked file that is actually installed, with `--require-hashes` so pip refuses the whole set unless every distribution matches a recorded hash. It carries environment markers for Windows and Linux, so one file serves both supported platforms. Regenerate it with `uv pip compile requirements.in --universal --generate-hashes --python-version 3.11 -o requirements.lock.txt` and commit the input and the output together. Notion logging uses the Notion REST API directly with an internal integration or personal access token in Windows Credential Manager; MCP and Pipedream are not required.

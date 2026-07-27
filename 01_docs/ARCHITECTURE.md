@@ -31,7 +31,7 @@ The table below was verified against an actual filesystem inventory, not carried
 | project root | README, licence, disclaimer, security, changelog, configuration template, `VERSION` | Same | Editable | Logic |
 | `_public/` | Generated history-free publication staging | Not in the tree | Never edited by hand | Derived |
 | `_backups/` | Dated pre-change copies | Not in the tree | Read-only once written | Data |
-| `.venv/` | Project-local Python runtime | Not in the tree | Never touch | External tool state |
+| `.venv/` | Development-only Python runtime; the runtime environment lives under `%LOCALAPPDATA%\ZenWiFiMonitor\.venv` per ADR-016 | Not in the tree | Never touch | External tool state |
 
 There is no `02_data/`, `05_logs/` or `06_exports/`. The project ingests no data and produces no exports, and its only
 persistent runtime state, the SQLite database and the log directory, is placed outside the project tree by ADR-001 so

@@ -4,7 +4,8 @@
 
 ZenWiFi Monitor does not vendor third-party source code. Its direct Python
 dependencies are installed from their published distributions according to
-`requirements.txt`. Their upstream license files remain part of those
+`requirements.in`, with their resolved versions and hashes in
+`requirements.lock.txt`. Their upstream license files remain part of those
 distributions.
 
 ## asusrouter 1.21.3

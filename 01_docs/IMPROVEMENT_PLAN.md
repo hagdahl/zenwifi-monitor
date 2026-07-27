@@ -88,17 +88,24 @@ Replace unbounded bootstrap logging with bounded rotation.
 - Never overwrite the active error record before a replacement exists.
 - Document the Windows and Debian bootstrap-log locations.
 
-## 5. Locked dependencies and CI supply chain
+## 5. Locked dependencies and CI supply chain - delivered except item 6
 
-1. Introduce a direct-dependency input file.
+1. Introduce a direct-dependency input file. Delivered: `requirements.in`.
 2. Generate a fully resolved, hash-locked requirements file for supported
-   Python versions and platforms.
-3. Install production dependencies with `--require-hashes`.
+   Python versions and platforms. Delivered: `requirements.lock.txt`, one
+   universal file whose environment markers cover Windows and Linux, so the two
+   platforms cannot drift apart into two files.
+3. Install production dependencies with `--require-hashes`. Delivered in
+   `Install.ps1` and in both CI jobs.
 4. Pin GitHub Actions to immutable commit hashes and document their upstream
-   release names.
-5. Extend CI to Windows and Ubuntu/Debian-compatible execution.
+   release names. Delivered.
+5. Extend CI to Windows and Ubuntu/Debian-compatible execution. Delivered as
+   two jobs. The Linux job runs the platform-neutral suites only, because
+   `src/watchdog.py` still imports the Windows Credential Manager backend at
+   module scope; `test_watchdog.py` and `test_outbox.py` are excluded there
+   deliberately and the exclusion ends when section 1 lands.
 6. Add a scheduled dependency-review workflow; upgrades remain deliberate pull
-   requests with regenerated hashes and tests.
+   requests with regenerated hashes and tests. Not started.
 
 ## 6. Debian deployment path
 
@@ -252,6 +259,8 @@ failure into an otherwise healthy system.
    earlier rounds remain open: the wrapper discarding the child's exit code
    and allowing overlapping runs, and hash-locked dependencies, which is
    step 3.
-3. Platform interfaces and dependency locking.
+3. Platform interfaces and dependency locking. Dependency locking is
+   delivered; the platform interfaces in section 1 remain, and they are what
+   unblocks the two suites the Linux CI job currently cannot run.
 4. Debian service, timer, credential, notification, and documentation path.
 5. Cross-platform CI and independent pre-publication review.

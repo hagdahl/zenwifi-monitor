@@ -1,0 +1,7 @@
+# ZenWiFi Monitor version: 0.1.0
+# Direct dependencies only. This file is the input; requirements.lock.txt is
+# the generated, fully resolved and hash-locked output that is installed.
+# Versions are pinned exactly because an unattended watchdog must not change
+# behaviour between two installs of the same commit.
+asusrouter==1.21.3
+keyring==25.6.0
