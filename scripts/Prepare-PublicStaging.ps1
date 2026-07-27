@@ -18,6 +18,8 @@ $safeDirectory = $projectRoot -replace '\\', '/'
 
 & git -c "safe.directory=$safeDirectory" -C $projectRoot diff --quiet
 if ($LASTEXITCODE -ne 0) { throw 'The source repository has uncommitted changes. Commit or discard them before preparing public staging.' }
+& git -c "safe.directory=$safeDirectory" -C $projectRoot diff --cached --quiet
+if ($LASTEXITCODE -ne 0) { throw 'The source repository has staged but uncommitted changes. Commit or unstage them before preparing public staging.' }
 
 $trackedFiles = & git -c "safe.directory=$safeDirectory" -C $projectRoot ls-files
 if ($LASTEXITCODE -ne 0 -or -not $trackedFiles) { throw 'No tracked source files were found.' }

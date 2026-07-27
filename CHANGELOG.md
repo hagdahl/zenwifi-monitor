@@ -29,6 +29,7 @@
 - Added a dry-run-first local configuration migration and a commit-bound independent pre-publication review prompt.
 - Added a history-free `_public` staging workflow for public GitHub publication.
 - Added a persistent local notification when Internet connectivity is confirmed after a monitor-initiated router restart.
+- Added the explicit `-EnableExecution` task-registration gate and recorded the production-activation decision model.
 - Hardened Windows PowerShell compatibility, configuration validation, task registration, TLS setup messaging, CI permissions, and bootstrap-failure documentation after independent review.
 
 ### Rollback
