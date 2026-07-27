@@ -103,13 +103,22 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     # With no remote destination an event can never be delivered, so retention
     # must reclaim it or the table grows for ever in a supported configuration.
     db.execute("UPDATE events SET timestamp_utc=?", (aged,)); db.commit()
-    kept = watchdog.purge_events(db, 30, 3, notion_enabled=True)
+    kept = watchdog.purge_events(db, 30, 3, delivery_configured=True)
     still = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    record("with Notion enabled a never-attempted event is kept", still == 1, f"purged={kept} remaining={still}")
-    dropped = watchdog.purge_events(db, 30, 3, notion_enabled=False)
+    record("a never-attempted event is kept while delivery is configured", still == 1,
+           f"purged={kept} remaining={still}")
+    dropped = watchdog.purge_events(db, 30, 3, delivery_configured=False)
     still = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    record("with Notion disabled retention reclaims it", dropped["abandoned"] == 1 and still == 0,
-           f"purged={dropped} remaining={still}")
+    record("retention reclaims it once delivery can never happen",
+           dropped["abandoned"] == 1 and still == 0, f"purged={dropped} remaining={still}")
+
+    # Delivery readiness needs both flags, so a dry-run soak with Notion enabled
+    # is not treated as a configured destination.
+    for mode, notion, expected in (("execute", True, True), ("dry-run", True, False),
+                                   ("execute", False, False), ("dry-run", False, False)):
+        actual = watchdog.delivery_is_configured({"execution_mode": mode, "notion": {"enabled": notion}})
+        record(f"delivery readiness for mode={mode} notion={notion}", actual is expected,
+               f"expected {expected}, got {actual}")
 
     # The counts a delivery run returns must describe rows that survived it,
     # not rows the same call has just deleted.

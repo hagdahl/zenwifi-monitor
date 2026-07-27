@@ -146,7 +146,7 @@ Raised by the third independent review round against `fb6b4a3..f51212b` and
 carried forward deliberately. Identifiers are the review's own. Each item names
 the failure it produces, not only the change to make.
 
-### F1. Delivery readiness is judged on the wrong predicate (medium)
+### F1. Delivery readiness is judged on the wrong predicate (medium) - closed
 
 `src/health.py` suppresses the stalled-queue finding, and `purge_events` in
 `src/watchdog.py` applies its no-destination retention rule, when
@@ -158,12 +158,12 @@ delivered, never purged, and reported as a stalled queue for ever, with
 attempts. The user guide's own sequence produces this, so it reaches the first
 outside user who follows the documented onboarding.
 
-Action: define delivery readiness as `notion.enabled and execution_mode ==
-"execute"` in both places, or have the stalled finding state that delivery is
-pending production activation. Pin it with a case for each of the four
-combinations of the two flags.
+Closed by `delivery_is_configured` in `src/watchdog.py` and the matching
+predicate in `src/health.py`, pinned by a case for each of the four combinations
+of the two flags and by a health case asserting no stalled finding during a
+dry-run soak.
 
-### F2. Condition-change escalation fires on improvement and can oscillate (low)
+### F2. Condition-change escalation fires on improvement and can oscillate (low) - closed
 
 The notification signature added for the previous round compares joined finding
 codes, so a code disappearing counts as a change. Recovering from two conditions
@@ -171,9 +171,12 @@ to one raises a notification, and a transient condition beside a persistent one
 raises one on every toggle, indefinitely. Codes are also not deduplicated, so two
 findings of the same kind change the signature.
 
-Action: escalate only when the current code set contains a code the previous set
-did not, or when the previous state was healthy. Deduplicate codes before
-joining.
+Closed by deduplicating codes and escalating only on a code that was not
+already present. A condition never announced before is shown at once; one that
+has been announced and returns is damped by `health.notice_cooldown_minutes`,
+default sixty minutes, so an intermittent fault beside a persistent one cannot
+raise a dialog on every toggle. The notification stamp is now JSON and carries
+the codes already announced.
 
 ### F3. The safety-relevant wiring is only partly pinned by tests (low)
 
@@ -226,8 +229,7 @@ write failure the way the notification stamp already does.
 1. Notion outbox, bootstrap rotation, and health monitor. Delivered; the outbox,
    the rotation bound and `src/health.py` are in place and the health task is
    registered.
-2. Section 9, starting with F1 and F2 because they sit in the same predicate and
-   the same function.
+2. Section 9. F1 and F2 are closed; F3, F4 and F5 remain.
 3. Platform interfaces and dependency locking.
 4. Debian service, timer, credential, notification, and documentation path.
 5. Cross-platform CI and independent pre-publication review.

@@ -68,7 +68,7 @@ def validate_config(cfg: dict) -> None:
     if cfg.get("execution_mode") not in ("dry-run", "execute"):
         raise RuntimeError("execution_mode must be 'dry-run' or 'execute'.")
     for section, keys in (("outbox", ("max_deliveries_per_run", "max_attempts_per_event", "retention_days")),
-                          ("health", ("run_age_minutes", "outbox_age_minutes"))):
+                          ("health", ("run_age_minutes", "outbox_age_minutes", "notice_cooldown_minutes"))):
         values = cfg.get(section)
         if values is None:
             continue
@@ -168,19 +168,19 @@ def outbox_settings(cfg: dict) -> tuple[int, int, int]:
             int(settings.get("retention_days", RETENTION_DAYS)))
 
 
-def purge_events(db, retention_days: int, max_attempts: int, notion_enabled: bool = True) -> dict:
+def purge_events(db, retention_days: int, max_attempts: int, delivery_configured: bool = True) -> dict:
     """Drop every event past retention that can no longer reach its destination.
 
     Three rules, because an event becomes undeliverable in three ways: it was
-    delivered; it exhausted its retry bound; or there is no remote destination
-    configured at all. Without the third rule an install with Notion disabled
-    would keep every event it ever wrote, since such events are neither
-    delivered nor ever attempted.
+    delivered; it exhausted its retry bound; or the installation is not
+    configured to deliver at all. Without the third rule an install that never
+    activated delivery would keep every event it ever wrote, since such events
+    are neither delivered nor ever attempted.
     """
     cutoff = utc_text(utc_now() - timedelta(days=retention_days))
     delivered = db.execute("DELETE FROM events WHERE delivered_to_notion=1 AND timestamp_utc < ?",
                            (cutoff,)).rowcount
-    if notion_enabled:
+    if delivery_configured:
         abandoned = db.execute("DELETE FROM events WHERE delivered_to_notion=0 AND delivery_attempts >= ? "
                                "AND timestamp_utc < ?", (max_attempts, cutoff)).rowcount
     else:
@@ -232,7 +232,7 @@ def deliver_outbox(db, cfg: dict) -> dict:
         delivered += 1
     # Retention runs before the counts, so the returned figures describe rows
     # that still exist rather than rows this call has just deleted.
-    purged = purge_events(db, retention_days, max_attempts, notion_is_enabled(cfg))
+    purged = purge_events(db, retention_days, max_attempts, delivery_is_configured(cfg))
     pending = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0").fetchone()[0]
     exhausted = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0 AND delivery_attempts >= ?",
                            (max_attempts,)).fetchone()[0]
@@ -243,6 +243,18 @@ def deliver_outbox(db, cfg: dict) -> dict:
 def notion_is_enabled(cfg: dict) -> bool:
     """Notion is an optional secondary log destination; SQLite is always primary."""
     return bool(cfg.get("notion", {}).get("enabled", False))
+
+
+def delivery_is_configured(cfg: dict) -> bool:
+    """Whether this installation can ever deliver an event to Notion.
+
+    Delivery needs both a destination and production activation. An install
+    that has enabled Notion but is still held in dry-run cannot deliver, so its
+    events are neither a stalled queue nor rows worth keeping for ever. The
+    predicate reads the configuration only, never the invocation flag, so a
+    manual dry-run of a production install does not reclaim its pending events.
+    """
+    return notion_is_enabled(cfg) and cfg.get("execution_mode") == "execute"
 
 def visible_reboot_notice():
     import ctypes
@@ -295,7 +307,7 @@ def main() -> int:
     # Retention runs on every monitoring run, not only when remote delivery is
     # enabled, so the local event table cannot grow without bound in dry-run or
     # in an install that never configured Notion.
-    purge_events(db, retention_days, max_attempts, notion_is_enabled(cfg))
+    purge_events(db, retention_days, max_attempts, delivery_is_configured(cfg))
     first_failure = get_state(db, "first_failure_utc")
     if online:
         if get_state(db, "pending_recovery_notification"):

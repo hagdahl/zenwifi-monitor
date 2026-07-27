@@ -66,8 +66,8 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     db.commit(); db.close()
 
     cfg = {"paths": {"state_database": str(database), "log_directory": str(root)},
-           "health": {"run_age_minutes": 15, "outbox_age_minutes": 180},
-           "notion": {"enabled": True}}
+           "health": {"run_age_minutes": 15, "outbox_age_minutes": 180, "notice_cooldown_minutes": 60},
+           "notion": {"enabled": True}, "execution_mode": "execute"}
 
     db = health.open_db(database)
     record("a fresh run is healthy", health.evaluate(db, cfg) == [], f"findings={health.evaluate(db, cfg)}")
@@ -93,6 +93,12 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     record("no stalled queue is reported when Notion is disabled",
            "outbox-stalled" not in codes(health.evaluate(db, without_notion)),
            f"codes={codes(health.evaluate(db, without_notion))}")
+    # A dry-run soak with Notion enabled cannot deliver either, so it must not
+    # be reported as a stalled queue with a remedy that does not apply.
+    soaking = dict(cfg); soaking["execution_mode"] = "dry-run"
+    record("no stalled queue is reported during a dry-run soak",
+           "outbox-stalled" not in codes(health.evaluate(db, soaking)),
+           f"codes={codes(health.evaluate(db, soaking))}")
     db.execute("DELETE FROM events"); db.commit()
     db.close()
 
@@ -132,6 +138,29 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     row = connection.execute("SELECT state, severity FROM health ORDER BY id DESC LIMIT 1").fetchone()
     connection.close()
     record("the replacement condition is recorded at equal severity", row == ("unhealthy", 1), f"row={row}")
+
+    # A condition already announced and coming back is damped; recovering is
+    # never announced; and once the cooldown has elapsed the return is shown.
+    def set_run_age(text):
+        connection = sqlite3.connect(database)
+        connection.execute("UPDATE runs SET timestamp_utc=?", (text,))
+        connection.commit(); connection.close()
+
+    set_run_age(stale)
+    run_health()
+    record("a condition already announced does not renotify inside the cooldown",
+           len(notices) == 2, f"notices={len(notices)}")
+    set_run_age(watchdog.utc_text())
+    run_health()
+    record("recovering to fewer conditions does not notify", len(notices) == 2, f"notices={len(notices)}")
+
+    connection = sqlite3.connect(database)
+    connection.execute("UPDATE state SET value=? WHERE key='health_last_notice_utc'",
+                       (watchdog.utc_text(watchdog.utc_now() - timedelta(hours=4)),))
+    connection.commit(); connection.close()
+    set_run_age(stale)
+    run_health()
+    record("with the cooldown elapsed the return is announced", len(notices) == 3, f"notices={len(notices)}")
     gc.collect()
 
 # An unreadable database is the condition this monitor exists to report.

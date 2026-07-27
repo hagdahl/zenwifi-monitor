@@ -18,7 +18,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _defaults import MAX_ATTEMPTS_PER_EVENT, OUTBOX_AGE_MINUTES, RUN_AGE_MINUTES  # noqa: E402
+from _defaults import (MAX_ATTEMPTS_PER_EVENT, NOTICE_COOLDOWN_MINUTES,  # noqa: E402
+                       OUTBOX_AGE_MINUTES, RUN_AGE_MINUTES)
 from _logrotate import append_log, bootstrap_log_path  # noqa: E402
 
 HEALTH_LOG_NAME = "health.log"
@@ -63,19 +64,24 @@ def notification_stamp_path() -> Path:
     return bootstrap_log_path().with_name("health-notified.txt")
 
 
-def read_notification_stamp() -> str:
+def read_notification_stamp() -> dict:
+    """Read the last recorded state. An unreadable or corrupt stamp reads as unknown."""
     try:
-        return notification_stamp_path().read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+        value = json.loads(notification_stamp_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
-def write_notification_stamp(signature: str) -> bool:
-    """Record the last notified state. Returns False when it could not be written."""
+def write_notification_stamp(state: str, severity: int, codes: list[str],
+                             last_notice_utc: str | None, notified_codes: list[str]) -> bool:
+    """Record the last state and notification. Returns False when it cannot be written."""
     path = notification_stamp_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(signature, encoding="utf-8")
+        path.write_text(json.dumps({"state": state, "severity": severity, "codes": codes,
+                                    "last_notice_utc": last_notice_utc,
+                                    "notified_codes": notified_codes}), encoding="utf-8")
         return True
     except OSError:
         return False
@@ -93,7 +99,7 @@ def check_recent_run(db, threshold_minutes: int) -> list[tuple[str, str]]:
 
 
 def check_outbox(db, age_minutes: int, max_attempts: int,
-                 notion_enabled: bool = True) -> list[tuple[str, str]]:
+                 delivery_configured: bool = True) -> list[tuple[str, str]]:
     """Report a stalled queue and an exhausted queue as separate conditions.
 
     An exhausted event is never retried, so counting it as a waiting event
@@ -104,7 +110,7 @@ def check_outbox(db, age_minutes: int, max_attempts: int,
     findings = []
     row = db.execute("SELECT COUNT(*), MIN(timestamp_utc) FROM events "
                      "WHERE delivered_to_notion=0 AND delivery_attempts < ?", (max_attempts,)).fetchone()
-    if notion_enabled and row and row[0]:
+    if delivery_configured and row and row[0]:
         age = utc_now() - datetime.fromisoformat(row[1])
         if age > timedelta(minutes=age_minutes):
             findings.append(("outbox-stalled", f"{row[0]} deliverable events have waited undelivered for "
@@ -141,10 +147,14 @@ def evaluate(db, cfg: dict) -> list[tuple[str, str]]:
         max_attempts = int(outbox_cfg.get("max_attempts_per_event", MAX_ATTEMPTS_PER_EVENT))
     except (TypeError, ValueError):
         max_attempts = MAX_ATTEMPTS_PER_EVENT
-    notion_enabled = bool(cfg.get("notion", {}).get("enabled", False)) if isinstance(cfg.get("notion"), dict) else False
+    # Delivery needs both a destination and production activation, so an install
+    # still held in dry-run has no queue to stall.
+    delivery_configured = (bool(cfg.get("notion", {}).get("enabled", False))
+                           if isinstance(cfg.get("notion"), dict) else False) \
+        and cfg.get("execution_mode") == "execute"
     findings = []
     for check, arguments in ((check_recent_run, (run_threshold,)),
-                             (check_outbox, (outbox_threshold, max_attempts, notion_enabled))):
+                             (check_outbox, (outbox_threshold, max_attempts, delivery_configured))):
         try:
             findings.extend(check(db, *arguments))
         except sqlite3.Error as error:
@@ -206,33 +216,63 @@ def main() -> int:
 
     state = "unhealthy" if findings else "healthy"
     severity = len(findings)
-    codes = sorted(code for code, _ in findings)
+    # Deduplicated, so two findings of the same kind do not read as a change.
+    codes = sorted({code for code, _ in findings})
     detail = " ".join(message for _, message in findings) if findings else "All local health checks passed."
-    # The signature carries which conditions are present, not only how many, so a
-    # change of condition at equal severity is still an escalation worth showing.
-    signature = f"{state}:{severity}:{','.join(codes)}"
+    health_cfg = cfg.get("health", {}) if isinstance(cfg.get("health"), dict) else {}
+    try:
+        cooldown = int(health_cfg.get("notice_cooldown_minutes", NOTICE_COOLDOWN_MINUTES))
+    except (TypeError, ValueError):
+        cooldown = NOTICE_COOLDOWN_MINUTES
 
     if db is not None:
         db.execute("INSERT INTO health(timestamp_utc,state,severity,detail) VALUES(?,?,?,?)",
                    (utc_text(), state, severity, detail[:1900]))
-        previous_state = get_state(db, "health_last_state") or "healthy"
-        previous_severity = int(get_state(db, "health_last_severity") or 0)
-        previous_codes = get_state(db, "health_last_codes") or ""
-        set_state(db, "health_last_state", state)
-        set_state(db, "health_last_severity", str(severity))
-        set_state(db, "health_last_codes", ",".join(codes))
         db.commit()
+        previous_state = get_state(db, "health_last_state") or "healthy"
+        previous_codes = [code for code in (get_state(db, "health_last_codes") or "").split(",") if code]
+        last_notice = get_state(db, "health_last_notice_utc")
+        notified_codes = [code for code in (get_state(db, "health_notified_codes") or "").split(",") if code]
     else:
         # Without the database the stamp file is the only memory of the last
         # notification, so a missing database still notifies once, not every run.
-        parts = read_notification_stamp().split(":")
-        previous_state = parts[0] if parts and parts[0] else "healthy"
-        previous_severity = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-        previous_codes = parts[2] if len(parts) > 2 else ""
-    escalating = state == "unhealthy" and (previous_state == "healthy"
-                                           or severity > previous_severity
-                                           or ",".join(codes) != previous_codes)
-    if not write_notification_stamp(signature) and db is None:
+        stamp = read_notification_stamp()
+        previous_state = stamp.get("state") or "healthy"
+        previous_codes = stamp.get("codes") or []
+        last_notice = stamp.get("last_notice_utc")
+        notified_codes = stamp.get("notified_codes") or []
+
+    # Only a condition that was not already present is an escalation, so
+    # recovering from two conditions to one is not announced as a new problem.
+    appeared = set(codes) - set(previous_codes)
+    # A condition never announced before is worth showing at once. One that has
+    # been announced and is coming back is damped, so an intermittent fault
+    # beside a persistent one cannot raise a dialog on every toggle.
+    novel = appeared - set(notified_codes)
+    returning = appeared & set(notified_codes)
+    if last_notice:
+        try:
+            due = utc_now() - datetime.fromisoformat(last_notice) >= timedelta(minutes=cooldown)
+        except ValueError:
+            due = True
+    else:
+        due = True
+    escalating = state == "unhealthy" and (previous_state == "healthy" or bool(novel)
+                                           or (bool(returning) and due))
+    notice_stamp = utc_text() if escalating else last_notice
+    if state == "healthy":
+        notified_codes = []
+    elif escalating:
+        notified_codes = sorted(set(notified_codes) | set(codes))
+
+    if db is not None:
+        set_state(db, "health_last_state", state)
+        set_state(db, "health_last_codes", ",".join(codes))
+        if notice_stamp:
+            set_state(db, "health_last_notice_utc", notice_stamp)
+        set_state(db, "health_notified_codes", ",".join(notified_codes))
+        db.commit()
+    if not write_notification_stamp(state, severity, codes, notice_stamp, notified_codes) and db is None:
         # Without a database and without a stamp there is no memory of the last
         # notification, so say so rather than silently notifying on every run.
         detail = f"{detail} The notification stamp could not be written, so repeat notices are possible."
