@@ -140,9 +140,94 @@ Do not force an outage or restart solely for this verification.
 - Publish from `_public` only after Windows and Debian tests pass and
   public-release scanning is clean.
 
+## 9. Outstanding review findings
+
+Raised by the third independent review round against `fb6b4a3..f51212b` and
+carried forward deliberately. Identifiers are the review's own. Each item names
+the failure it produces, not only the change to make.
+
+### F1. Delivery readiness is judged on the wrong predicate (medium)
+
+`src/health.py` suppresses the stalled-queue finding, and `purge_events` in
+`src/watchdog.py` applies its no-destination retention rule, when
+`notion.enabled` is false. Delivery actually requires **both** `notion.enabled`
+and `execution_mode` set to `execute`, so an install that has enabled Notion but
+is still in its dry-run soak satisfies neither rule: its events are never
+delivered, never purged, and reported as a stalled queue for ever, with
+`--reset-outbox-attempts` offering no remedy because the events have no failed
+attempts. The user guide's own sequence produces this, so it reaches the first
+outside user who follows the documented onboarding.
+
+Action: define delivery readiness as `notion.enabled and execution_mode ==
+"execute"` in both places, or have the stalled finding state that delivery is
+pending production activation. Pin it with a case for each of the four
+combinations of the two flags.
+
+### F2. Condition-change escalation fires on improvement and can oscillate (low)
+
+The notification signature added for the previous round compares joined finding
+codes, so a code disappearing counts as a change. Recovering from two conditions
+to one raises a notification, and a transient condition beside a persistent one
+raises one on every toggle, indefinitely. Codes are also not deduplicated, so two
+findings of the same kind change the signature.
+
+Action: escalate only when the current code set contains a code the previous set
+did not, or when the previous state was healthy. Deduplicate codes before
+joining.
+
+### F3. The safety-relevant wiring is only partly pinned by tests (low)
+
+`04_tests/test_watchdog.py` already pins the two-gate restart decision across the
+three non-authorized combinations. Not pinned: the delivery gate itself, the
+reboot cooldown, the failure-window threshold, and the rotation-failure tolerance
+in `src/_logrotate.py`. Each can be reverted with every suite still green.
+
+Action: extend the existing `main()` harness, which already stubs the secret
+store and the probes, with an offline sequence covering the cooldown and the
+failure window, an execute-mode run with `notion_event` stubbed asserting the
+delivery gate, and a case where `rotate_log` raises and the line is still
+written.
+
+### F4. A health run that fails after the database opens still dies silently (low)
+
+The guarded open closes the case where a locked or corrupt database aborted the
+run before any check. A failure in the recording block that follows, a lock
+acquired between open and insert, a full disk, or an unwritable log directory,
+still propagates to the top-level handler and exits 2 with no notification.
+
+Action: wrap the recording and logging block. The findings and the notification
+decision are already computed at that point, so notify first, or tolerate the
+write failure the way the notification stamp already does.
+
+### F5. Smaller items (low)
+
+- A non-numeric `health` threshold raises inside a check, which `evaluate` does
+  not catch, so the health run exits 2. `validate_config` rejects such a
+  configuration loudly, so the exposure is a hand-edited file, but the health
+  monitor's independence goal argues for the same fallback it already uses for
+  the retry bound.
+- ADR-012 still describes the wrapper as taking a path relative to the project
+  root, without mentioning the two-entry whitelist that now defines it.
+- The wrapper ignores unrecognized arguments instead of refusing them, so a
+  mistyped `-script=` silently launches the default entry point. A strict refusal
+  would match the fail-closed posture the whitelist established.
+
+### Carried forward from earlier rounds
+
+- A valid launch through the wrapper still discards the child's exit code, and
+  the wrapper returns before the child, so the task's single-instance policy does
+  not prevent overlapping monitor processes. Overlapping delivery runs have no
+  per-row claim and could deliver twice. The health monitor compensates by
+  observing run freshness rather than exit codes.
+- Dependencies are pinned by version but not by hash, as `README.md` records.
+
 ## Implementation order
 
-1. Notion outbox, bootstrap rotation, and health monitor.
-2. Platform interfaces and dependency locking.
-3. Debian service, timer, credential, notification, and documentation path.
-4. Cross-platform CI and independent pre-publication review.
+1. Notion outbox, bootstrap rotation, and health monitor. Delivered; the outbox,
+   the rotation bound and `src/health.py` are in place and the health task is
+   registered.
+2. Section 9, starting with F1 and F2 because they sit in the same predicate and
+   the same function.
+3. Platform interfaces and dependency locking.
+4. Debian service, timer, credential, notification, and documentation path.
+5. Cross-platform CI and independent pre-publication review.
