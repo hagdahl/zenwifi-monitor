@@ -157,10 +157,29 @@ def outbox_settings(cfg: dict) -> tuple[int, int, int]:
             int(settings.get("retention_days", 30)))
 
 
-def purge_delivered_events(db, retention_days: int) -> int:
-    """Drop delivered events older than the retention window."""
+def purge_events(db, retention_days: int, max_attempts: int) -> dict:
+    """Drop delivered events past retention, and undelivered events that have
+    exhausted their retry bound and are also past retention.
+
+    Without the second rule an undeliverable event would occupy the queue for
+    ever, because an exhausted event is never retried and was never purged.
+    """
     cutoff = utc_text(utc_now() - timedelta(days=retention_days))
-    cursor = db.execute("DELETE FROM events WHERE delivered_to_notion=1 AND timestamp_utc < ?", (cutoff,))
+    delivered = db.execute("DELETE FROM events WHERE delivered_to_notion=1 AND timestamp_utc < ?",
+                           (cutoff,)).rowcount
+    abandoned = db.execute("DELETE FROM events WHERE delivered_to_notion=0 AND delivery_attempts >= ? "
+                           "AND timestamp_utc < ?", (max_attempts, cutoff)).rowcount
+    db.commit()
+    return {"delivered": delivered, "abandoned": abandoned}
+
+
+def reset_exhausted_events(db, max_attempts: int) -> int:
+    """Clear the retry bound so exhausted events are attempted again.
+
+    This is the operator escape hatch after the remote destination is fixed.
+    """
+    cursor = db.execute("UPDATE events SET delivery_attempts=0, last_delivery_error=NULL "
+                        "WHERE delivered_to_notion=0 AND delivery_attempts >= ?", (max_attempts,))
     db.commit()
     return cursor.rowcount
 
@@ -168,8 +187,11 @@ def purge_delivered_events(db, retention_days: int) -> int:
 def deliver_outbox(db, cfg: dict) -> dict:
     """Deliver undelivered events oldest first, stopping safely on the first failure.
 
-    An event is marked delivered only after a successful Notion response, so a
-    run that is interrupted retries rather than losing or duplicating the event.
+    Delivery is at-least-once, not exactly-once. An event is marked delivered
+    only after a successful Notion response, so nothing is lost; but a process
+    that dies between a successful response and that mark will resend the event
+    on the next run. Duplicates in the remote log are therefore possible after
+    an interrupted run, and are preferred over silently dropping an event.
     """
     max_per_run, max_attempts, retention_days = outbox_settings(cfg)
     rows = db.execute("SELECT id,status,action,detail FROM events "
@@ -194,9 +216,9 @@ def deliver_outbox(db, cfg: dict) -> dict:
     pending = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0").fetchone()[0]
     exhausted = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0 AND delivery_attempts >= ?",
                            (max_attempts,)).fetchone()[0]
-    purged = purge_delivered_events(db, retention_days)
+    purged = purge_events(db, retention_days, max_attempts)
     return {"delivered": delivered, "pending": pending, "exhausted": exhausted,
-            "purged": purged, "stopped_on": stopped_on}
+            "purged": purged["delivered"], "abandoned": purged["abandoned"], "stopped_on": stopped_on}
 
 
 def notion_is_enabled(cfg: dict) -> bool:
@@ -233,6 +255,8 @@ def main() -> int:
     parser.add_argument("--execute", action="store_true", help="Allows authorized router and Notion actions.")
     parser.add_argument("--notice", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--recovery-notice", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--reset-outbox-attempts", action="store_true",
+                        help="Clear the retry bound on events that exhausted it, then exit without monitoring.")
     args = parser.parse_args()
     if args.notice:
         visible_reboot_notice(); return 0
@@ -241,9 +265,17 @@ def main() -> int:
     if args.config is None:
         raise RuntimeError("--config is required for a monitoring run.")
     require_persistent_secret_store(); cfg = load_config(args.config); validate_config(cfg); db = open_db(Path(cfg["paths"]["state_database"]))
+    max_per_run, max_attempts, retention_days = outbox_settings(cfg)
+    if args.reset_outbox_attempts:
+        reset = reset_exhausted_events(db, max_attempts)
+        print(f"Cleared the retry bound on {reset} outbox events.")
+        return 0
     effective_mode = "execute" if args.execute and cfg["execution_mode"] == "execute" else "dry-run"
     online = internet_available(cfg["monitor"]["probe_urls"])
     log_run(db, online, effective_mode, cfg["execution_mode"])
+    # Retention runs on every monitoring run, not only when remote delivery is
+    # enabled, so the local event table cannot grow without bound in dry-run.
+    purge_events(db, retention_days, max_attempts)
     first_failure = get_state(db, "first_failure_utc")
     if online:
         if get_state(db, "pending_recovery_notification"):

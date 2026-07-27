@@ -75,13 +75,25 @@ with tempfile.TemporaryDirectory() as temp:
     attempts = db.execute("SELECT MAX(delivery_attempts) FROM events").fetchone()[0]
     record("attempts never exceed the configured bound", attempts == 3, f"attempts={attempts}")
 
-    # Retention removes delivered events, never undelivered ones.
-    old = watchdog.utc_text(watchdog.utc_now() - timedelta(days=90))
-    db.execute("UPDATE events SET timestamp_utc=? WHERE delivered_to_notion=1", (old,)); db.commit()
-    purged = watchdog.purge_delivered_events(db, 30)
-    remaining = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0").fetchone()[0]
-    record("retention purges delivered events only", purged == 2 and remaining == 1,
-           f"purged={purged} remaining_undelivered={remaining}")
+    # An exhausted event can be released again by the operator escape hatch.
+    released = watchdog.reset_exhausted_events(db, 3)
+    still_exhausted = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0 AND delivery_attempts >= 3").fetchone()[0]
+    record("exhausted events can be released for another attempt",
+           released == 1 and still_exhausted == 0, f"released={released} still_exhausted={still_exhausted}")
+    for _ in range(3):
+        watchdog.deliver_outbox(db, CFG)
+
+    # Retention removes delivered events and abandoned ones, but never a fresh
+    # undelivered event that has attempts left.
+    aged = watchdog.utc_text(watchdog.utc_now() - timedelta(days=90))
+    db.execute("UPDATE events SET timestamp_utc=?", (aged,)); db.commit()
+    fresh = watchdog.log_event(db, "Offline", "Fresh", "still deliverable")
+    purged = watchdog.purge_events(db, 30, 3)
+    remaining = [row[0] for row in db.execute("SELECT id FROM events")]
+    record("retention purges delivered and abandoned events",
+           purged["delivered"] == 2 and purged["abandoned"] == 1, f"purged={purged}")
+    record("a fresh deliverable event survives retention", remaining == [fresh],
+           f"remaining ids={remaining}, fresh={fresh}")
     db.close()
 
 # Bootstrap log rotation is bounded and never truncates the active record.
