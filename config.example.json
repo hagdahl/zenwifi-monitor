@@ -23,5 +23,14 @@
     "data_source_id": "<Notion data source ID>",
     "api_version": "2026-03-11"
   },
-  "execution_mode": "dry-run"
+  "execution_mode": "dry-run",
+  "outbox": {
+    "max_deliveries_per_run": 20,
+    "max_attempts_per_event": 5,
+    "retention_days": 30
+  },
+  "health": {
+    "run_age_minutes": 15,
+    "outbox_age_minutes": 180
+  }
 }
