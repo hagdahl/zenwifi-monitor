@@ -35,7 +35,16 @@ def rotate_log(path: Path, max_bytes: int = MAX_LOG_BYTES, retained: int = RETAI
 
 def append_log(path: Path, line: str, max_bytes: int = MAX_LOG_BYTES,
                retained: int = RETAINED_LOG_FILES) -> None:
+    """Append a line, rotating first when the file has grown past the bound.
+
+    Two processes write these logs, so a rotation can lose the race and fail on
+    a file the other one holds open. Appending matters more than rotating, so a
+    failed rotation is tolerated and the line is still written.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    rotate_log(path, max_bytes, retained)
+    try:
+        rotate_log(path, max_bytes, retained)
+    except OSError:
+        pass
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")

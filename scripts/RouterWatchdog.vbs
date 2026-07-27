@@ -4,9 +4,11 @@
 ' non-blocking, so a scheduled job raises no UI surface and steals no focus.
 ' Every scheduled task shall be registered through this wrapper.
 ' Optional arguments:
-'   --script=<path relative to the project root>   default: src\watchdog.py
+'   --script=<one of the allowed entry points>     default: src\watchdog.py
 '   --execute                                      forwarded to the target script
-Dim shell, fso, root, targetScript, executionArgument, argument, commandLine
+' Only the project's own entry points may be launched, so the wrapper cannot be
+' turned into a general silent runner for an arbitrary file.
+Dim shell, fso, root, targetScript, executionArgument, argument, commandLine, candidate, allowed
 Set shell = CreateObject("Wscript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 root = fso.GetParentFolderName(WScript.ScriptFullName)
@@ -16,7 +18,14 @@ For Each argument In WScript.Arguments
   If LCase(argument) = "--execute" Then
     executionArgument = " --execute"
   ElseIf LCase(Left(argument, 9)) = "--script=" Then
-    targetScript = Mid(argument, 10)
+    candidate = LCase(Replace(Mid(argument, 10), "/", "\"))
+    allowed = "|src\watchdog.py|src\health.py|"
+    If InStr(allowed, "|" & candidate & "|") = 0 Then
+      ' Exit non-zero so Task Scheduler records the refusal rather than the
+      ' wrapper silently launching nothing.
+      WScript.Quit 2
+    End If
+    targetScript = candidate
   End If
 Next
 commandLine = Chr(34) & root & "\..\.venv\Scripts\python.exe" & Chr(34) & " " & _
