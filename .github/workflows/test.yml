@@ -22,3 +22,4 @@ jobs:
       - run: python 04_tests/test_check_versions.py
       - run: python 04_tests/test_outbox.py
       - run: python 04_tests/test_health.py
+      - run: python 04_tests/test_wrapper.py

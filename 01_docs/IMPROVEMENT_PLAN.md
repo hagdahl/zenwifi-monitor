@@ -178,18 +178,22 @@ default sixty minutes, so an intermittent fault beside a persistent one cannot
 raise a dialog on every toggle. The notification stamp is now JSON and carries
 the codes already announced.
 
-### F3. The safety-relevant wiring is only partly pinned by tests (low)
+### F3. The safety-relevant wiring is only partly pinned by tests (low) - closed
 
 `04_tests/test_watchdog.py` already pins the two-gate restart decision across the
 three non-authorized combinations. Not pinned: the delivery gate itself, the
 reboot cooldown, the failure-window threshold, and the rotation-failure tolerance
 in `src/_logrotate.py`. Each can be reverted with every suite still green.
 
-Action: extend the existing `main()` harness, which already stubs the secret
-store and the probes, with an offline sequence covering the cooldown and the
-failure window, an execute-mode run with `notion_event` stubbed asserting the
-delivery gate, and a case where `rotate_log` raises and the line is still
-written.
+Closed. `04_tests/test_watchdog.py` now drives `main()` through the delivery
+gate, the failure window and the reboot cooldown; `04_tests/test_outbox.py`
+covers a `rotate_log` that raises; and `04_tests/test_wrapper.py` runs the
+launcher itself through `cscript` and asserts that eight refused argument shapes
+each exit 2. Only the refusal cases are exercised, because an accepted value
+makes the wrapper resolve and launch the real monitor against the real local
+configuration. Each pin was verified by reverting the fix in a temporary copy
+and confirming the suite fails: removing the delivery gate, the cooldown check
+and the rotation tolerance each produced a failing assertion.
 
 ### F4. A health run that fails after the database opens still dies silently (low)
 
@@ -229,7 +233,7 @@ write failure the way the notification stamp already does.
 1. Notion outbox, bootstrap rotation, and health monitor. Delivered; the outbox,
    the rotation bound and `src/health.py` are in place and the health task is
    registered.
-2. Section 9. F1 and F2 are closed; F3, F4 and F5 remain.
+2. Section 9. F1, F2 and F3 are closed; F4 and F5 remain.
 3. Platform interfaces and dependency locking.
 4. Debian service, timer, credential, notification, and documentation path.
 5. Cross-platform CI and independent pre-publication review.

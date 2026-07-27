@@ -143,6 +143,19 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
            and not log.with_name(log.name + ".3").is_file())
     record("the newest line survives rotation", "line 399" in log.read_text(encoding="utf-8"))
 
+    # Two processes write these logs, so a rotation can lose the race. Appending
+    # matters more than rotating: the line must still reach the file.
+    original_rotate = _logrotate.rotate_log
+    def refuse(*args, **kwargs):
+        raise OSError(32, "the file is in use by another process")
+    _logrotate.rotate_log = refuse
+    try:
+        _logrotate.append_log(log, "written despite a failed rotation", max_bytes=8192, retained=2)
+    finally:
+        _logrotate.rotate_log = original_rotate
+    record("a failed rotation does not lose the line",
+           "written despite a failed rotation" in log.read_text(encoding="utf-8"))
+
 # The two entry points must agree on what "exhausted" means, and the template
 # must agree with both, or the watchdog and the health monitor act on different
 # queues without anything failing.
