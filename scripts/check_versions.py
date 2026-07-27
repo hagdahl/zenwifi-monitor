@@ -34,7 +34,7 @@ EXEMPT_PATHS = frozenset({"LICENSE", "VERSION"})
 # here is reported as unclassified rather than silently skipped.
 COMMENT_SYNTAX = {
     ".py": "#", ".ps1": "#", ".yml": "#", ".yaml": "#", ".txt": "#",
-    ".in": "#",
+    ".in": "#", ".sh": "#", ".service": "#", ".timer": "#",
     ".gitignore": "#", ".gitattributes": "#",
     ".vbs": "'",
     ".md": "<!--",

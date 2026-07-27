@@ -1,0 +1,13 @@
+# ZenWiFi Monitor version: 0.1.0
+[Unit]
+Description=Run the ZenWiFi Monitor health check every fifteen minutes
+Documentation=https://github.com/hagdahl/zenwifi-monitor
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Unit=zenwifi-monitor-health.service
+
+[Install]
+WantedBy=timers.target

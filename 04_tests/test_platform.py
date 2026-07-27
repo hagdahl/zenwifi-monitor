@@ -186,6 +186,55 @@ try:
 finally:
     secrets_module.sys.platform = original_platform
 
+# --- the systemd credential source -------------------------------------------
+# An unattended Debian service has no desktop keyring, so systemd's encrypted
+# credentials are the store. The presence of the directory is what selects it,
+# so these cases substitute the environment rather than a function.
+
+import os
+import tempfile
+
+original_environ = os.environ.get(secrets_module.CREDENTIALS_DIRECTORY)
+try:
+    with tempfile.TemporaryDirectory() as temp:
+        credentials = Path(temp)
+        (credentials / "router_username").write_text("someone", encoding="utf-8")
+        (credentials / "router_password").write_text("secret\n", encoding="utf-8")
+        os.environ[secrets_module.CREDENTIALS_DIRECTORY] = str(credentials)
+
+        record("a systemd credential is read from the credentials directory",
+               secrets_module.get_secret("router_username") == "someone")
+        record("a trailing newline in a credential is stripped",
+               secrets_module.get_secret("router_password") == "secret",
+               repr(secrets_module.get_secret("router_password")))
+        record("an absent credential reads as missing rather than empty",
+               secrets_module.get_secret("notion_token") is None)
+
+        # With a credentials directory present the store is acceptable without
+        # consulting keyring at all, which is what lets a service run with no
+        # desktop session.
+        accepted = True
+        try:
+            secrets_module.require_persistent_secret_store()
+        except RuntimeError:
+            accepted = False
+        record("a systemd credentials directory is an acceptable store", accepted)
+
+    # The directory is gone now, but the variable still points at it: systemd
+    # declared credentials and they are not there. That is a misconfiguration
+    # and must fail closed rather than fall back to another store.
+    refused = False
+    try:
+        secrets_module.require_persistent_secret_store()
+    except RuntimeError as error:
+        refused = "does not exist" in str(error)
+    record("a declared but missing credentials directory is refused", refused)
+finally:
+    if original_environ is None:
+        os.environ.pop(secrets_module.CREDENTIALS_DIRECTORY, None)
+    else:
+        os.environ[secrets_module.CREDENTIALS_DIRECTORY] = original_environ
+
 # --- the core modules still import and expose the gate ----------------------
 
 watchdog = load("watchdog")

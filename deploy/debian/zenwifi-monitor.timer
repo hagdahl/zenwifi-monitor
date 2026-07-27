@@ -1,0 +1,19 @@
+# ZenWiFi Monitor version: 0.1.0
+[Unit]
+Description=Run the ZenWiFi Internet watchdog every five minutes
+Documentation=https://github.com/hagdahl/zenwifi-monitor
+
+[Timer]
+# Two minutes after boot rather than immediately: the network is usually still
+# settling, and a false outage recorded at every boot would poison the failure
+# window the restart decision depends on.
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+# Deliberately not Persistent=true. A machine that was off does not need to
+# catch up on monitoring runs it could not have made; replaying them would only
+# write misleading history.
+Unit=zenwifi-monitor.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,73 @@
+# ZenWiFi Monitor version: 0.1.0
+#
+# One monitoring run. The timer decides when; this unit decides how.
+#
+# ACTIVATION GATE 1 OF 2. This unit deliberately does NOT carry --execute, so a
+# default install can never restart a router however the timer fires. Production
+# activation adds it through a drop-in, which install.sh writes only when given
+# --enable-execution. Gate 2 is execution_mode in the local configuration. Both
+# must be set, exactly as on Windows.
+[Unit]
+Description=ZenWiFi Internet watchdog (one monitoring run)
+Documentation=https://github.com/hagdahl/zenwifi-monitor
+# The probes are HTTPS requests, so a run before the network is up would report
+# a false outage on every boot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=zenwifi
+Group=zenwifi
+
+ExecStart=/opt/zenwifi-monitor/venv/bin/python /opt/zenwifi-monitor/src/watchdog.py --config /etc/zenwifi-monitor/config.json
+
+# A service has no desktop keyring, so credentials come from systemd. They are
+# decrypted into a private tmpfs directory readable only by this user, never
+# written to disk and never swapped. src/_secrets.py reads them from there and
+# refuses every other source.
+LoadCredentialEncrypted=router_username:/etc/zenwifi-monitor/credentials/router_username.cred
+LoadCredentialEncrypted=router_password:/etc/zenwifi-monitor/credentials/router_password.cred
+# Optional. Remove this line on an install that does not use Notion; a missing
+# credential file makes the unit fail to start rather than run without it.
+LoadCredentialEncrypted=notion_token:/etc/zenwifi-monitor/credentials/notion_token.cred
+
+# A run that hangs must not hold the lease past its bound or block the timer.
+TimeoutStartSec=120
+
+# Least privilege. The monitor reads a configuration file, writes a database and
+# a log, and makes outbound HTTPS requests. Nothing else is granted.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+# ProtectSystem=strict makes the whole filesystem read-only, so the two paths
+# the monitor legitimately writes are named explicitly. Adding a third path here
+# is a decision, not a detail.
+StateDirectory=zenwifi-monitor
+LogsDirectory=zenwifi-monitor
+ReadWritePaths=/var/lib/zenwifi-monitor /var/log/zenwifi-monitor
+
+[Install]
+WantedBy=multi-user.target

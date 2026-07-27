@@ -31,6 +31,7 @@ jobs:
       - run: python -m pip check
       - run: python 04_tests/test_check_versions.py
       - run: python 04_tests/test_platform.py
+      - run: python 04_tests/test_deploy.py
       - run: python 04_tests/test_watchdog.py
       - run: python 04_tests/test_outbox.py
       - run: python 04_tests/test_health.py
@@ -49,6 +50,7 @@ jobs:
       - run: python -m pip check
       - run: python 04_tests/test_check_versions.py
       - run: python 04_tests/test_platform.py
+      - run: python 04_tests/test_deploy.py
       - run: python 04_tests/test_watchdog.py
       - run: python 04_tests/test_outbox.py
       - run: python 04_tests/test_health.py

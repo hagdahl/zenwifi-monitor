@@ -1,0 +1,63 @@
+# ZenWiFi Monitor version: 0.1.0
+#
+# The independent health observer. It can never restart the router: it runs a
+# different entry point, and that entry point contains no restart path at all,
+# which 04_tests/test_health.py asserts statically.
+#
+# It carries NO credentials. The health monitor is standard-library only and
+# reads local state; giving it router credentials would widen its blast radius
+# for no benefit. That is also why it needs no LoadCredentialEncrypted line and
+# why src/_secrets.py is never imported by it.
+#
+# Known limitation, recorded as F6 in 01_docs/IMPROVEMENT_PLAN.md and accepted
+# by the project owner: this observer runs on the same host, under the same
+# init system, from the same install as the thing it observes. It is independent
+# of the watchdog's dependencies and of its exit codes, but it is not
+# independent of a fault that stops both from starting. Only an observer
+# elsewhere would be, and this install does not have one.
+[Unit]
+Description=ZenWiFi Monitor local health check (never restarts the router)
+Documentation=https://github.com/hagdahl/zenwifi-monitor
+
+[Service]
+Type=oneshot
+User=zenwifi
+Group=zenwifi
+
+ExecStart=/opt/zenwifi-monitor/venv/bin/python /opt/zenwifi-monitor/src/health.py --config /etc/zenwifi-monitor/config.json
+
+TimeoutStartSec=60
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+# No AF_INET: the health monitor makes no network request, and saying so here
+# means a future edit that adds one fails loudly instead of quietly working.
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+StateDirectory=zenwifi-monitor
+LogsDirectory=zenwifi-monitor
+ReadWritePaths=/var/lib/zenwifi-monitor /var/log/zenwifi-monitor
+
+[Install]
+WantedBy=multi-user.target

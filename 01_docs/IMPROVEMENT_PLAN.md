@@ -124,7 +124,22 @@ Replace unbounded bootstrap logging with bounded rotation.
 6. Add a scheduled dependency-review workflow; upgrades remain deliberate pull
    requests with regenerated hashes and tests. Not started.
 
-## 6. Debian deployment path
+## 6. Debian deployment path - partially delivered
+
+Delivered: `deploy/debian/` carries the two services, the two timers and an
+installer that creates the service account, the environment from the
+hash-locked file with `--require-hashes`, the directories and the units, and
+that writes the `--execute` drop-in only when asked. Credentials come from
+systemd's encrypted store, which `src/_secrets.py` reads and which it refuses
+to substitute. `01_docs/DEBIAN.md` documents the install, the two gates and
+the `journalctl` route. `04_tests/test_deploy.py` validates every unit with
+`systemd-analyze verify` and pins the gates and the least-privilege settings.
+
+Not delivered: Linux equivalents of the interactive configuration setup and
+the migration script, which are still PowerShell only. And nothing here has
+run under a real systemd: no timer has fired on a Debian host, the install run
+substituted `systemctl`, and the desktop notification path has never met a
+real session bus. The first install is a soak, in dry-run.
 
 Create a Debian-specific deployment package containing:
 
@@ -286,6 +301,13 @@ Action, for an owner decision rather than an implementation to be assumed:
 
 The first is cheap and honest. The third is what the failure actually argues
 for. Recording the choice matters more than which is chosen.
+
+**Accepted by the project owner on 2026-07-27**, with the first remedy: the
+shared failure mode is stated plainly rather than engineered away. It is
+recorded in the Debian health unit, in `01_docs/DEBIAN.md` and as ADR-021, so
+the limitation travels with the code rather than living in a chat transcript.
+An observer outside the host remains the only thing that would close it, and
+the only thing that would also notice the machine being off.
 
 ### Carried forward from earlier rounds
 
