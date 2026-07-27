@@ -4,6 +4,7 @@
 Runs the real delivery code path with the remote call replaced by a counting
 stub, so no network request is ever made. Emits a machine-readable result.
 """
+import gc
 import importlib.util
 import json
 import sys
@@ -118,6 +119,60 @@ with tempfile.TemporaryDirectory() as temp:
            log.with_name(log.name + ".1").is_file() and log.with_name(log.name + ".2").is_file()
            and not log.with_name(log.name + ".3").is_file())
     record("the newest line survives rotation", "line 399" in log.read_text(encoding="utf-8"))
+
+# The wiring in main() is pinned, not only the helpers it calls. Reverting the
+# every-run purge or the reset branch must fail a test, not pass unnoticed.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp); database = root / "state.sqlite3"; config = root / "config.json"
+    config.write_text(json.dumps({
+        "paths": {"state_database": str(database)},
+        "router": {"host": "router.invalid", "management_port": 8443, "use_tls": True},
+        "monitor": {"probe_urls": ["https://invalid.example"],
+                    "failure_minutes_before_reboot": 15, "reboot_cooldown_minutes": 30},
+        "notion": {"enabled": False}, "execution_mode": "dry-run",
+        "outbox": {"max_deliveries_per_run": 20, "max_attempts_per_event": 3, "retention_days": 30},
+    }), encoding="utf-8")
+    db = watchdog.open_db(database)
+    aged = watchdog.utc_text(watchdog.utc_now() - timedelta(days=90))
+    db.execute("INSERT INTO events(timestamp_utc,status,action,detail,delivered_to_notion) VALUES(?,?,?,?,1)",
+               (aged, "Online", "Restored", "old and delivered"))
+    db.execute("INSERT INTO events(timestamp_utc,status,action,detail,delivery_attempts) VALUES(?,?,?,?,99)",
+               (aged, "Error", "Poison", "old and exhausted"))
+    db.commit(); db.close()
+
+    watchdog.require_persistent_secret_store = lambda: None
+    watchdog.internet_available = lambda _: True
+
+    def run_main(extra=()):
+        old_argv = sys.argv
+        try:
+            sys.argv = ["watchdog.py", "--config", str(config)] + list(extra)
+            return watchdog.main()
+        finally:
+            sys.argv = old_argv
+
+    code = run_main()
+    db = watchdog.open_db(database)
+    remaining = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    runs = db.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    db.close()
+    record("a monitoring run purges aged events without any remote destination",
+           code == 0 and remaining == 0, f"exit={code} remaining={remaining}")
+    record("that run still recorded itself", runs == 1, f"runs={runs}")
+
+    db = watchdog.open_db(database)
+    db.execute("INSERT INTO events(timestamp_utc,status,action,detail,delivery_attempts) VALUES(?,?,?,?,99)",
+               (watchdog.utc_text(), "Error", "Poison", "fresh and exhausted"))
+    db.commit(); db.close()
+    code = run_main(["--reset-outbox-attempts"])
+    db = watchdog.open_db(database)
+    attempts = db.execute("SELECT delivery_attempts FROM events ORDER BY id DESC LIMIT 1").fetchone()[0]
+    runs_after = db.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    db.close()
+    record("the reset flag releases exhausted events", code == 0 and attempts == 0,
+           f"exit={code} attempts={attempts}")
+    record("the reset flag exits without recording a monitoring run", runs_after == 1, f"runs={runs_after}")
+    gc.collect()
 
 print(json.dumps({"suite": "outbox", "checks": len(results), "failures": 0,
                   "result": "green", "findings": results}, indent=2))
