@@ -48,6 +48,25 @@ readable by the service group only. It then enables both timers.
 Edit `/etc/zenwifi-monitor/config.json` before going further. The paths in it
 must point at the state and log directories the installer created.
 
+Two helpers, both standard-library only so they work before the environment
+exists, and both dry runs unless told otherwise:
+
+```
+/opt/zenwifi-monitor/venv/bin/python /opt/zenwifi-monitor/scripts/configure.py \
+    --config /etc/zenwifi-monitor/config.json --validate
+/opt/zenwifi-monitor/venv/bin/python /opt/zenwifi-monitor/scripts/configure.py \
+    --config /etc/zenwifi-monitor/config.json --migrate           # shows the plan
+/opt/zenwifi-monitor/venv/bin/python /opt/zenwifi-monitor/scripts/configure.py \
+    --config /etc/zenwifi-monitor/config.json --migrate --apply   # writes, with a backup
+python3 /opt/zenwifi-monitor/scripts/configure.py --discover-gateway
+```
+
+`--validate` runs the monitor's own predicate rather than a second opinion
+about it, so a configuration that validates here is one the monitor accepts.
+`--migrate` brings an earlier configuration up to the current schema, and never
+changes `execution_mode` or enables Notion on its own. This is the same tool
+`scripts/Migrate-LocalConfig.ps1` calls on Windows.
+
 ## Credentials
 
 A service has no desktop keyring to talk to, so credentials come from systemd's

@@ -97,6 +97,13 @@ PYVERSION
   install -d -m 0750 -o "${SERVICE_USER}" -g "${SERVICE_USER}" /var/log/zenwifi-monitor
 
   cp -a "${SOURCE_DIR}/src" "${PREFIX}/"
+  # configure.py is standard-library only, so it works before the environment
+  # exists; it is installed alongside so an operator can validate and migrate
+  # the configuration on the target host rather than only at build time.
+  install -d -m 0755 "${PREFIX}/scripts"
+  install -m 0755 "${SOURCE_DIR}/scripts/configure.py" "${PREFIX}/scripts/configure.py"
+  install -m 0644 "${SOURCE_DIR}/VERSION" "${PREFIX}/VERSION"
+  install -m 0644 "${SOURCE_DIR}/config.example.json" "${PREFIX}/config.example.json"
   cp -a "${SOURCE_DIR}/requirements.in" "${SOURCE_DIR}/requirements.lock.txt" "${PREFIX}/"
 
   python3 -m venv "${PREFIX}/venv"
@@ -111,6 +118,8 @@ PYVERSION
     install -m 0640 -o root -g "${SERVICE_USER}" \
       "${SOURCE_DIR}/config.example.json" "${CONFIG_DIR}/config.json"
     echo "Wrote a template to ${CONFIG_DIR}/config.json. Edit it before enabling execution."
+    echo "Then check it with:"
+    echo "  ${PREFIX}/venv/bin/python ${PREFIX}/scripts/configure.py --config ${CONFIG_DIR}/config.json --validate"
   else
     echo "Kept the existing ${CONFIG_DIR}/config.json."
   fi

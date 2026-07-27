@@ -135,8 +135,17 @@ to substitute. `01_docs/DEBIAN.md` documents the install, the two gates and
 the `journalctl` route. `04_tests/test_deploy.py` validates every unit with
 `systemd-analyze verify` and pins the gates and the least-privilege settings.
 
-Not delivered: Linux equivalents of the interactive configuration setup and
-the migration script, which are still PowerShell only. And nothing here has
+Also delivered: `scripts/configure.py` is now the single implementation of
+configuration migration and validation for both platforms, standard-library
+only so it works before the environment exists, and
+`scripts/Migrate-LocalConfig.ps1` is a thin wrapper that calls it. `--validate`
+runs the monitor's own predicate rather than a second opinion about it, and
+`--discover-gateway` covers the Linux half of router setup. The installer
+places the tool on the target host.
+
+Not delivered: the interactive first-time setup on Linux is still a matter of
+editing the template by hand, where Windows has `Setup-LocalConfig.ps1` and
+`Setup-RouterConfig.ps1` with its TLS handshake check. And nothing here has
 run under a real systemd: no timer has fired on a Debian host, the install run
 substituted `systemctl`, and the desktop notification path has never met a
 real session bus. The first install is a soak, in dry-run.

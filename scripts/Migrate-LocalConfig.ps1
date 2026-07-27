@@ -4,17 +4,15 @@
 Safely migrates an earlier local ZenWiFi Monitor configuration to the current schema.
 
 .DESCRIPTION
-The script is a dry-run unless -WriteConfig is supplied. It never contacts the
-router or Notion, reads no credentials, and never enables restart execution.
+A thin wrapper. All migration logic lives in scripts/configure.py, which is the
+single implementation for Windows and Debian alike; two implementations would
+drift into disagreeing about what a current configuration looks like, which is
+the same failure the shared defaults module exists to prevent.
 
-The migration maps the legacy router https_port setting to management_port,
-records use_tls as true, adds the explicit Notion enabled flag, and adds any
-missing optional section, taking its defaults from config.example.json so the
-template stays the single source of those values. Notion remains disabled
-unless it was already enabled or -EnableNotion is supplied, and execution_mode
-is never changed when it is already present.
-Before writing, the script creates an ignored timestamped backup next to
-config.local.json.
+The behaviour is unchanged: a dry run unless -WriteConfig is supplied, nothing
+contacts the router or Notion, no credential is read, execution_mode is never
+changed when it is already present, and an ignored timestamped backup is
+written next to the configuration before anything is updated.
 #>
 [CmdletBinding()]
 param(
@@ -24,88 +22,26 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
-$configPath = Join-Path $projectRoot 'config.local.json'
+$tool = Join-Path $projectRoot 'scripts\configure.py'
+if (-not (Test-Path -LiteralPath $tool)) { throw "The configuration tool is missing at $tool." }
 
-if (-not (Test-Path -LiteralPath $configPath)) {
-  throw 'config.local.json does not exist. Run Setup-LocalConfig.ps1 first.'
+# Prefer the runtime environment, fall back to the project one, then to the
+# launcher. configure.py is standard-library only, so any Python 3.11 will do:
+# configuration work has to be possible before the environment exists.
+$candidates = @(
+  (Join-Path $env:LOCALAPPDATA 'ZenWiFiMonitor\.venv\Scripts\python.exe'),
+  (Join-Path $projectRoot '.venv\Scripts\python.exe')
+)
+$python = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $python) {
+  if (Get-Command py -ErrorAction SilentlyContinue) { $python = 'py'; $prefix = @('-3.11') }
+  else { throw 'No Python 3.11 interpreter was found. Install one, or run Install.ps1 -InstallDependencies.' }
 }
+if (-not $prefix) { $prefix = @() }
 
-$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-if (-not $config.PSObject.Properties['router']) { throw 'The local configuration has no router section.' }
-if (-not $config.PSObject.Properties['notion']) { $config | Add-Member -NotePropertyName notion -NotePropertyValue ([pscustomobject]@{}) }
+$arguments = @('--migrate')
+if ($EnableNotion) { $arguments += '--enable-notion' }
+if ($WriteConfig) { $arguments += '--apply' }
 
-$changes = [System.Collections.Generic.List[string]]::new()
-if (-not $config.router.PSObject.Properties['management_port']) {
-  if (-not $config.router.PSObject.Properties['https_port']) { throw 'The router section has neither management_port nor https_port.' }
-  $config.router | Add-Member -NotePropertyName management_port -NotePropertyValue $config.router.https_port
-  $config.router.PSObject.Properties.Remove('https_port')
-  $changes.Add('Mapped router.https_port to router.management_port.')
-}
-if (-not $config.router.PSObject.Properties['use_tls']) {
-  $config.router | Add-Member -NotePropertyName use_tls -NotePropertyValue $true
-  $changes.Add('Set router.use_tls to true.')
-}
-
-$notionWasEnabled = $false
-if ($config.notion.PSObject.Properties['enabled']) { $notionWasEnabled = [bool]$config.notion.enabled }
-$notionEnabled = $notionWasEnabled -or $EnableNotion
-$config.notion | Add-Member -NotePropertyName enabled -NotePropertyValue $notionEnabled -Force
-if (-not $notionWasEnabled) {
-  if ($EnableNotion) { $changes.Add('Enabled optional Notion logging by explicit request.') }
-  else { $changes.Add('Set optional Notion logging to disabled.') }
-}
-if (-not $config.notion.PSObject.Properties['api_version']) {
-  $config.notion | Add-Member -NotePropertyName api_version -NotePropertyValue '2026-03-11'
-  $changes.Add('Added the Notion API version.')
-}
-$projectVersion = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
-if (-not $config.PSObject.Properties['config_version']) {
-  $config | Add-Member -NotePropertyName config_version -NotePropertyValue $projectVersion
-  $changes.Add("Added config_version $projectVersion.")
-} elseif ($config.config_version -ne $projectVersion) {
-  $config.config_version = $projectVersion
-  $changes.Add("Updated config_version to $projectVersion.")
-}
-$examplePath = Join-Path $projectRoot 'config.example.json'
-if (Test-Path -LiteralPath $examplePath) {
-  $example = Get-Content -LiteralPath $examplePath -Raw | ConvertFrom-Json
-  foreach ($section in @('outbox', 'health')) {
-    if (-not $example.PSObject.Properties[$section]) { continue }
-    if (-not $config.PSObject.Properties[$section]) {
-      $config | Add-Member -NotePropertyName $section -NotePropertyValue $example.$section
-      $changes.Add("Added the $section section with template defaults.")
-    } else {
-      foreach ($property in $example.$section.PSObject.Properties) {
-        if (-not $config.$section.PSObject.Properties[$property.Name]) {
-          $config.$section | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value
-          $changes.Add("Added $section.$($property.Name) with the template default.")
-        }
-      }
-    }
-  }
-}
-
-if (-not $config.PSObject.Properties['execution_mode']) {
-  $config | Add-Member -NotePropertyName execution_mode -NotePropertyValue 'dry-run'
-  $changes.Add('Set execution_mode to dry-run.')
-}
-
-Write-Host 'Configuration migration plan:'
-if ($changes.Count -eq 0) { Write-Host 'No schema changes are required.' }
-else { $changes | ForEach-Object { Write-Host "- $_" } }
-Write-Host "Notion logging after migration: $notionEnabled"
-Write-Host 'Router communication after migration: TLS enabled.'
-Write-Host 'Restart execution after migration: unchanged.'
-Write-Host "Execution mode after migration: $($config.execution_mode)"
-
-if (-not $WriteConfig) {
-  Write-Host 'Dry-run only. Re-run with -WriteConfig to create a backup and update config.local.json.'
-  exit 0
-}
-
-$backupPath = "$configPath.$(Get-Date -Format 'yyyyMMdd-HHmmss').bak"
-Copy-Item -LiteralPath $configPath -Destination $backupPath -ErrorAction Stop
-$json = $config | ConvertTo-Json -Depth 6
-[System.IO.File]::WriteAllText($configPath, $json, (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false))
-Write-Host 'Local configuration migrated. No router, Notion, or credential action was performed.'
-Write-Host "Backup created: $backupPath"
+& $python @prefix $tool @arguments
+exit $LASTEXITCODE
