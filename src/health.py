@@ -18,11 +18,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _defaults import MAX_ATTEMPTS_PER_EVENT, OUTBOX_AGE_MINUTES, RUN_AGE_MINUTES  # noqa: E402
 from _logrotate import append_log, bootstrap_log_path  # noqa: E402
 
-DEFAULT_RUN_AGE_MINUTES = 15
-DEFAULT_OUTBOX_AGE_MINUTES = 180
-DEFAULT_MAX_ATTEMPTS = 5
 HEALTH_LOG_NAME = "health.log"
 
 
@@ -137,12 +135,12 @@ def check_bootstrap_log(db) -> list[tuple[str, str]]:
 def evaluate(db, cfg: dict) -> list[tuple[str, str]]:
     health_cfg = cfg.get("health", {}) if isinstance(cfg.get("health"), dict) else {}
     outbox_cfg = cfg.get("outbox", {}) if isinstance(cfg.get("outbox"), dict) else {}
-    run_threshold = health_cfg.get("run_age_minutes", DEFAULT_RUN_AGE_MINUTES)
-    outbox_threshold = health_cfg.get("outbox_age_minutes", DEFAULT_OUTBOX_AGE_MINUTES)
+    run_threshold = health_cfg.get("run_age_minutes", RUN_AGE_MINUTES)
+    outbox_threshold = health_cfg.get("outbox_age_minutes", OUTBOX_AGE_MINUTES)
     try:
-        max_attempts = int(outbox_cfg.get("max_attempts_per_event", DEFAULT_MAX_ATTEMPTS))
+        max_attempts = int(outbox_cfg.get("max_attempts_per_event", MAX_ATTEMPTS_PER_EVENT))
     except (TypeError, ValueError):
-        max_attempts = DEFAULT_MAX_ATTEMPTS
+        max_attempts = MAX_ATTEMPTS_PER_EVENT
     notion_enabled = bool(cfg.get("notion", {}).get("enabled", False)) if isinstance(cfg.get("notion"), dict) else False
     findings = []
     for check, arguments in ((check_recent_run, (run_threshold,)),

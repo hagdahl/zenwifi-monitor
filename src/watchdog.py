@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _defaults import MAX_ATTEMPTS_PER_EVENT, MAX_DELIVERIES_PER_RUN, RETENTION_DAYS  # noqa: E402
 from _logrotate import append_log, bootstrap_log_path  # noqa: E402
 
 import keyring
@@ -162,9 +163,9 @@ def notion_event(cfg: dict, status: str, action: str, detail: str) -> None:
 def outbox_settings(cfg: dict) -> tuple[int, int, int]:
     """Bounded retry and retention limits, so one bad event cannot block the queue."""
     settings = cfg.get("outbox", {}) if isinstance(cfg.get("outbox"), dict) else {}
-    return (int(settings.get("max_deliveries_per_run", 20)),
-            int(settings.get("max_attempts_per_event", 5)),
-            int(settings.get("retention_days", 30)))
+    return (int(settings.get("max_deliveries_per_run", MAX_DELIVERIES_PER_RUN)),
+            int(settings.get("max_attempts_per_event", MAX_ATTEMPTS_PER_EVENT)),
+            int(settings.get("retention_days", RETENTION_DAYS)))
 
 
 def purge_events(db, retention_days: int, max_attempts: int, notion_enabled: bool = True) -> dict:
@@ -229,10 +230,12 @@ def deliver_outbox(db, cfg: dict) -> dict:
         db.execute("UPDATE events SET delivered_to_notion=1, last_delivery_error=NULL WHERE id=?", (row_id,))
         db.commit()
         delivered += 1
+    # Retention runs before the counts, so the returned figures describe rows
+    # that still exist rather than rows this call has just deleted.
+    purged = purge_events(db, retention_days, max_attempts, notion_is_enabled(cfg))
     pending = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0").fetchone()[0]
     exhausted = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0 AND delivery_attempts >= ?",
                            (max_attempts,)).fetchone()[0]
-    purged = purge_events(db, retention_days, max_attempts, notion_is_enabled(cfg))
     return {"delivered": delivered, "pending": pending, "exhausted": exhausted,
             "purged": purged["delivered"], "abandoned": purged["abandoned"], "stopped_on": stopped_on}
 
@@ -281,7 +284,7 @@ def main() -> int:
     if args.config is None:
         raise RuntimeError("--config is required for a monitoring run.")
     require_persistent_secret_store(); cfg = load_config(args.config); validate_config(cfg); db = open_db(Path(cfg["paths"]["state_database"]))
-    max_per_run, max_attempts, retention_days = outbox_settings(cfg)
+    _, max_attempts, retention_days = outbox_settings(cfg)
     if args.reset_outbox_attempts:
         reset = reset_exhausted_events(db, max_attempts)
         print(f"Cleared the retry bound on {reset} outbox events.")

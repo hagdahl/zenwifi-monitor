@@ -3,6 +3,10 @@
 
 Runs the real delivery code path with the remote call replaced by a counting
 stub, so no network request is ever made. Emits a machine-readable result.
+
+Temporary directories tolerate cleanup errors because SQLite on Windows can
+hold the write-ahead log briefly after the last connection closes; that is a
+teardown artefact and never affects an assertion.
 """
 import gc
 import importlib.util
@@ -29,7 +33,7 @@ def record(name, passed, detail=""):
 CFG = {"notion": {"enabled": True, "data_source_id": "d", "api_version": "v"},
        "outbox": {"max_deliveries_per_run": 20, "max_attempts_per_event": 3, "retention_days": 30}}
 
-with tempfile.TemporaryDirectory() as temp:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     db = watchdog.open_db(Path(temp) / "state.sqlite3")
 
     # An outage records events locally with no delivery attempted.
@@ -106,10 +110,20 @@ with tempfile.TemporaryDirectory() as temp:
     still = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     record("with Notion disabled retention reclaims it", dropped["abandoned"] == 1 and still == 0,
            f"purged={dropped} remaining={still}")
+
+    # The counts a delivery run returns must describe rows that survived it,
+    # not rows the same call has just deleted.
+    watchdog.log_event(db, "Error", "Poison", "aged and exhausted")
+    db.execute("UPDATE events SET timestamp_utc=?, delivery_attempts=99", (aged,)); db.commit()
+    outcome = watchdog.deliver_outbox(db, CFG)
+    surviving = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    record("the returned counts describe surviving rows",
+           outcome["pending"] == surviving and outcome["exhausted"] == surviving,
+           f"outcome={outcome} surviving={surviving}")
     db.close()
 
 # Bootstrap log rotation is bounded and never truncates the active record.
-with tempfile.TemporaryDirectory() as temp:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     import _logrotate
     log = Path(temp) / "bootstrap-errors.log"
     for index in range(400):
@@ -119,6 +133,22 @@ with tempfile.TemporaryDirectory() as temp:
            log.with_name(log.name + ".1").is_file() and log.with_name(log.name + ".2").is_file()
            and not log.with_name(log.name + ".3").is_file())
     record("the newest line survives rotation", "line 399" in log.read_text(encoding="utf-8"))
+
+# The two entry points must agree on what "exhausted" means, and the template
+# must agree with both, or the watchdog and the health monitor act on different
+# queues without anything failing.
+import _defaults  # noqa: E402
+template = json.loads((Path(__file__).parents[1] / "config.example.json").read_text(encoding="utf-8-sig"))
+record("the watchdog reads its outbox defaults from the shared module",
+       watchdog.outbox_settings({}) == (_defaults.MAX_DELIVERIES_PER_RUN,
+                                        _defaults.MAX_ATTEMPTS_PER_EVENT,
+                                        _defaults.RETENTION_DAYS),
+       f"outbox_settings({{}})={watchdog.outbox_settings({})}")
+record("the configuration template matches the shared defaults",
+       template["outbox"]["max_attempts_per_event"] == _defaults.MAX_ATTEMPTS_PER_EVENT
+       and template["outbox"]["retention_days"] == _defaults.RETENTION_DAYS
+       and template["health"]["run_age_minutes"] == _defaults.RUN_AGE_MINUTES,
+       f"template outbox={template['outbox']} health={template['health']}")
 
 # The wiring in main() is pinned, not only the helpers it calls. Reverting the
 # every-run purge or the reset branch must fail a test, not pass unnoticed.
