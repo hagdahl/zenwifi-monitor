@@ -1,12 +1,14 @@
 # ZenWiFi Monitor version: 0.1.0
 """Smoke test for the local health monitor.
 
-Temporary directories tolerate cleanup errors because SQLite on Windows can
-hold the write-ahead log briefly after the last connection closes; that is a
-teardown artefact and never affects an assertion.
-
 The health monitor must never restart the router and must stay silent while
 healthy. This test runs the real evaluation path against a temporary database.
+
+Every path the monitor touches is redirected into the temporary directory, so
+the suite never reads or writes real machine state and cannot race the live
+scheduled job. Temporary directories tolerate cleanup errors because SQLite on
+Windows can hold the write-ahead log briefly after the last connection closes;
+that is a teardown artefact and never affects an assertion.
 """
 import gc
 import importlib.util
@@ -19,11 +21,17 @@ from pathlib import Path
 
 SRC = Path(__file__).parents[1] / "src"
 sys.path.insert(0, str(SRC))
-health = importlib.util.module_from_spec(importlib.util.spec_from_file_location("health", SRC / "health.py"))
-importlib.util.spec_from_file_location("health", SRC / "health.py").loader.exec_module(health)
-watchdog = importlib.util.module_from_spec(importlib.util.spec_from_file_location("watchdog", SRC / "watchdog.py"))
-importlib.util.spec_from_file_location("watchdog", SRC / "watchdog.py").loader.exec_module(watchdog)
 
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, SRC / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+health = load("health")
+watchdog = load("watchdog")
 results = []
 
 
@@ -33,14 +41,26 @@ def record(name, passed, detail=""):
         raise AssertionError(f"{name}: {detail}")
 
 
+def codes(findings):
+    return sorted(code for code, _ in findings)
+
+
+def messages(findings):
+    return " ".join(message for _, message in findings)
+
+
+source = (SRC / "health.py").read_text(encoding="utf-8")
 record("the health monitor imports no third-party dependency",
-       "keyring" not in (SRC / "health.py").read_text(encoding="utf-8")
-       and "asusrouter" not in (SRC / "health.py").read_text(encoding="utf-8"))
-record("the health monitor cannot restart the router",
-       "reboot" not in (SRC / "health.py").read_text(encoding="utf-8").lower())
+       "keyring" not in source and "asusrouter" not in source)
+record("the health monitor cannot restart the router", "reboot" not in source.lower())
 
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
-    root = Path(temp); database = root / "state.sqlite3"
+    root = Path(temp)
+    # Redirect every real-machine path into the temporary directory.
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+
+    database = root / "state.sqlite3"
     db = watchdog.open_db(database)
     watchdog.log_run(db, True, "dry-run", "dry-run")
     db.commit(); db.close()
@@ -52,43 +72,78 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     db = health.open_db(database)
     record("a fresh run is healthy", health.evaluate(db, cfg) == [], f"findings={health.evaluate(db, cfg)}")
 
-    # Age the newest run past the threshold.
     stale = watchdog.utc_text(watchdog.utc_now() - timedelta(minutes=45))
     db.execute("UPDATE runs SET timestamp_utc=?", (stale,)); db.commit()
-    findings = health.evaluate(db, cfg)
-    record("a stale run is reported", len(findings) == 1 and "minutes old" in findings[0], f"findings={findings}")
+    record("a stale run is reported", codes(health.evaluate(db, cfg)) == ["stale-run"],
+           f"codes={codes(health.evaluate(db, cfg))}")
 
-    # An old undelivered event is reported too.
     db.execute("INSERT INTO events(timestamp_utc,status,action,detail) VALUES(?,?,?,?)",
                (watchdog.utc_text(watchdog.utc_now() - timedelta(hours=6)), "Offline", "Monitoring started", "x"))
     db.commit()
-    findings = health.evaluate(db, cfg)
-    record("a stalled outbox is reported", any("undelivered" in item for item in findings), f"findings={findings}")
+    record("a stalled outbox is reported", "outbox-stalled" in codes(health.evaluate(db, cfg)),
+           f"codes={codes(health.evaluate(db, cfg))}")
 
-    # An exhausted event is reported as its own actionable condition, not as a
-    # waiting event, so it cannot hold the state unhealthy with nothing to do.
     db.execute("UPDATE events SET delivery_attempts=99"); db.commit()
-    findings = health.evaluate(db, cfg)
-    record("an exhausted event is not counted as waiting",
-           not any("waited undelivered" in item for item in findings), f"findings={findings}")
-    record("an exhausted event is reported with a remedy",
-           any("--reset-outbox-attempts" in item for item in findings), f"findings={findings}")
+    found = health.evaluate(db, cfg)
+    record("an exhausted event is not counted as waiting", "outbox-stalled" not in codes(found), f"codes={codes(found)}")
+    record("an exhausted event is reported with a remedy", "--reset-outbox-attempts" in messages(found))
 
-    # With no remote destination there is no queue to stall, so undelivered
-    # local records must not be reported as a fault.
     db.execute("UPDATE events SET delivery_attempts=0"); db.commit()
-    with_notion = dict(cfg); with_notion["notion"] = {"enabled": True}
     without_notion = dict(cfg); without_notion["notion"] = {"enabled": False}
-    record("a stalled queue is reported when Notion is enabled",
-           any("waited undelivered" in item for item in health.evaluate(db, with_notion)))
     record("no stalled queue is reported when Notion is disabled",
-           not any("waited undelivered" in item for item in health.evaluate(db, without_notion)),
-           f"findings={health.evaluate(db, without_notion)}")
+           "outbox-stalled" not in codes(health.evaluate(db, without_notion)),
+           f"codes={codes(health.evaluate(db, without_notion))}")
+    db.execute("DELETE FROM events"); db.commit()
     db.close()
 
-    # The full run records state, writes the health log, and returns non-zero when unhealthy.
+    config_path = root / "config.json"; config_path.write_text(json.dumps(cfg), encoding="utf-8")
+    notices = []
+    health.launch_health_notice = lambda detail: notices.append(detail)
+
+    def run_health():
+        argv = sys.argv
+        try:
+            sys.argv = ["health.py", "--config", str(config_path)]
+            return health.main()
+        finally:
+            sys.argv = argv
+
+    code = run_health()
+    record("an unhealthy check exits 1", code == 1, f"exit was {code}")
+    record("an escalation notifies exactly once", len(notices) == 1, f"notices={len(notices)}")
+    record("the health log is written", (root / "health.log").is_file())
+    connection = sqlite3.connect(database)
+    row = connection.execute("SELECT state, severity FROM health ORDER BY id DESC LIMIT 1").fetchone()
+    connection.close()
+    record("the health state is persisted", row == ("unhealthy", 1), f"row={row}")
+
+    run_health()
+    record("a steady unhealthy state does not renotify", len(notices) == 1, f"notices={len(notices)}")
+
+    # A different condition at the same severity is still an escalation.
+    connection = sqlite3.connect(database)
+    connection.execute("UPDATE runs SET timestamp_utc=?", (watchdog.utc_text(),))
+    connection.execute("INSERT INTO events(timestamp_utc,status,action,detail,delivery_attempts) "
+                       "VALUES(?,?,?,?,?)", (watchdog.utc_text(), "Error", "Poison", "x", 99))
+    connection.commit(); connection.close()
+    run_health()
+    record("a different condition at equal severity notifies", len(notices) == 2, f"notices={len(notices)}")
+    connection = sqlite3.connect(database)
+    row = connection.execute("SELECT state, severity FROM health ORDER BY id DESC LIMIT 1").fetchone()
+    connection.close()
+    record("the replacement condition is recorded at equal severity", row == ("unhealthy", 1), f"row={row}")
+    gc.collect()
+
+# An unreadable database is the condition this monitor exists to report.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp)
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+    database = root / "corrupt.sqlite3"
+    database.write_bytes(b"this is not a database" * 64)
     config_path = root / "config.json"
-    config_path.write_text(json.dumps(cfg), encoding="utf-8")
+    config_path.write_text(json.dumps({"paths": {"state_database": str(database),
+                                                 "log_directory": str(root)}}), encoding="utf-8")
     notices = []
     health.launch_health_notice = lambda detail: notices.append(detail)
     argv = sys.argv
@@ -97,49 +152,32 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
         code = health.main()
     finally:
         sys.argv = argv
-    record("an unhealthy check exits 1", code == 1, f"exit was {code}")
-    record("an escalation notifies exactly once", len(notices) == 1, f"notices={notices}")
-    record("the health log is written", (root / "health.log").is_file())
-    connection = sqlite3.connect(database)
-    row = connection.execute("SELECT state, severity FROM health ORDER BY id DESC LIMIT 1").fetchone()
-    connection.close()
-    record("the health state is persisted", row[0] == "unhealthy" and row[1] >= 1, f"row={row}")
-
-    # Repeating the same unhealthy state must not notify again.
-    argv = sys.argv
-    try:
-        sys.argv = ["health.py", "--config", str(config_path)]
-        health.main()
-    finally:
-        sys.argv = argv
-    record("a steady unhealthy state does not renotify", len(notices) == 1, f"notices={notices}")
+    record("a corrupt database exits 1 rather than dying silently", code == 1, f"exit was {code}")
+    record("a corrupt database raises a notification", len(notices) == 1, f"notices={len(notices)}")
+    record("the corrupt-database finding names the condition",
+           "could not be opened or read" in notices[0], f"detail={notices[0]!r}")
     gc.collect()
 
 # A missing database must still notify once, not on every single run.
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     root = Path(temp)
-    cfg = {"paths": {"state_database": str(root / "absent.sqlite3"), "log_directory": str(root)}}
-    config_path = root / "config.json"; config_path.write_text(json.dumps(cfg), encoding="utf-8")
-    stamp = health.notification_stamp_path()
-    previous_stamp = stamp.read_text(encoding="utf-8") if stamp.is_file() else None
-    try:
-        health.write_notification_stamp("healthy:0")
-        notices = []
-        health.launch_health_notice = lambda detail: notices.append(detail)
-        for _ in range(3):
-            argv = sys.argv
-            try:
-                sys.argv = ["health.py", "--config", str(config_path)]
-                code = health.main()
-            finally:
-                sys.argv = argv
-        record("a missing database exits 1", code == 1, f"exit was {code}")
-        record("a missing database notifies once, not once per run", len(notices) == 1, f"notices={len(notices)}")
-    finally:
-        if previous_stamp is None:
-            stamp.unlink(missing_ok=True)
-        else:
-            stamp.write_text(previous_stamp, encoding="utf-8")
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+    config_path = root / "config.json"
+    config_path.write_text(json.dumps({"paths": {"state_database": str(root / "absent.sqlite3"),
+                                                 "log_directory": str(root)}}), encoding="utf-8")
+    notices = []
+    health.launch_health_notice = lambda detail: notices.append(detail)
+    for _ in range(3):
+        argv = sys.argv
+        try:
+            sys.argv = ["health.py", "--config", str(config_path)]
+            code = health.main()
+        finally:
+            sys.argv = argv
+    record("a missing database exits 1", code == 1, f"exit was {code}")
+    record("a missing database notifies once, not once per run", len(notices) == 1, f"notices={len(notices)}")
+    gc.collect()
 
 print(json.dumps({"suite": "health", "checks": len(results), "failures": 0,
                   "result": "green", "findings": results}, indent=2))

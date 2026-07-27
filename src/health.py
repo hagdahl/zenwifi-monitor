@@ -83,18 +83,19 @@ def write_notification_stamp(signature: str) -> bool:
         return False
 
 
-def check_recent_run(db, threshold_minutes: int) -> list[str]:
+def check_recent_run(db, threshold_minutes: int) -> list[tuple[str, str]]:
     row = db.execute("SELECT timestamp_utc FROM runs ORDER BY id DESC LIMIT 1").fetchone()
     if row is None:
-        return ["The runs table holds no monitoring run at all."]
+        return [("no-runs", "The runs table holds no monitoring run at all.")]
     age = utc_now() - datetime.fromisoformat(row[0])
     if age > timedelta(minutes=threshold_minutes):
-        return [f"The newest monitoring run is {int(age.total_seconds() // 60)} minutes old; "
-                f"the threshold is {threshold_minutes}."]
+        return [("stale-run", f"The newest monitoring run is {int(age.total_seconds() // 60)} minutes old; "
+                              f"the threshold is {threshold_minutes}.")]
     return []
 
 
-def check_outbox(db, age_minutes: int, max_attempts: int, notion_enabled: bool = True) -> list[str]:
+def check_outbox(db, age_minutes: int, max_attempts: int,
+                 notion_enabled: bool = True) -> list[tuple[str, str]]:
     """Report a stalled queue and an exhausted queue as separate conditions.
 
     An exhausted event is never retried, so counting it as a waiting event
@@ -108,18 +109,19 @@ def check_outbox(db, age_minutes: int, max_attempts: int, notion_enabled: bool =
     if notion_enabled and row and row[0]:
         age = utc_now() - datetime.fromisoformat(row[1])
         if age > timedelta(minutes=age_minutes):
-            findings.append(f"{row[0]} deliverable events have waited undelivered for "
-                            f"{int(age.total_seconds() // 60)} minutes.")
+            findings.append(("outbox-stalled", f"{row[0]} deliverable events have waited undelivered for "
+                                               f"{int(age.total_seconds() // 60)} minutes."))
     exhausted = db.execute("SELECT COUNT(*) FROM events "
                            "WHERE delivered_to_notion=0 AND delivery_attempts >= ?",
                            (max_attempts,)).fetchone()[0]
     if exhausted:
-        findings.append(f"{exhausted} events exhausted their delivery retries. Fix the remote destination, "
-                        "then run the watchdog once with --reset-outbox-attempts.")
+        findings.append(("outbox-exhausted",
+                         f"{exhausted} events exhausted their delivery retries. Fix the remote destination, "
+                         "then run the watchdog once with --reset-outbox-attempts."))
     return findings
 
 
-def check_bootstrap_log(db) -> list[str]:
+def check_bootstrap_log(db) -> list[tuple[str, str]]:
     path = bootstrap_log_path()
     if not path.is_file():
         return []
@@ -127,11 +129,12 @@ def check_bootstrap_log(db) -> list[str]:
     previous = get_state(db, "health_bootstrap_stamp")
     set_state(db, "health_bootstrap_stamp", stamp)
     if previous is not None and previous != stamp:
-        return [f"The bootstrap error log changed since the previous health check: {path.name}"]
+        return [("bootstrap-changed",
+                 f"The bootstrap error log changed since the previous health check: {path.name}")]
     return []
 
 
-def evaluate(db, cfg: dict) -> list[str]:
+def evaluate(db, cfg: dict) -> list[tuple[str, str]]:
     health_cfg = cfg.get("health", {}) if isinstance(cfg.get("health"), dict) else {}
     outbox_cfg = cfg.get("outbox", {}) if isinstance(cfg.get("outbox"), dict) else {}
     run_threshold = health_cfg.get("run_age_minutes", DEFAULT_RUN_AGE_MINUTES)
@@ -147,11 +150,13 @@ def evaluate(db, cfg: dict) -> list[str]:
         try:
             findings.extend(check(db, *arguments))
         except sqlite3.Error as error:
-            findings.append(f"{check.__name__} could not read the local database: {error}")
+            findings.append(("db-unreadable",
+                             f"{check.__name__} could not read the local database: {type(error).__name__}."))
     try:
         findings.extend(check_bootstrap_log(db))
     except OSError as error:
-        findings.append(f"The bootstrap error log could not be inspected: {error}")
+        findings.append(("bootstrap-unreadable",
+                         f"The bootstrap error log could not be inspected: {type(error).__name__}."))
     return findings
 
 
@@ -187,32 +192,49 @@ def main() -> int:
     log_directory = Path(cfg["paths"].get("log_directory", database.parent))
     findings = []
     if not database.is_file():
-        findings.append(f"The local state database is missing at the configured path: {database.name}")
+        findings.append(("db-missing",
+                         f"The local state database is missing at the configured path: {database.name}"))
         db = None
     else:
-        db = open_db(database)
-        findings = evaluate(db, cfg)
+        try:
+            db = open_db(database)
+            findings = evaluate(db, cfg)
+        except sqlite3.Error as error:
+            # A locked or corrupt database is exactly the condition this monitor
+            # exists to report, so it must reach the notification path.
+            findings = [("db-unreadable",
+                         f"The local state database could not be opened or read: {type(error).__name__}.")]
+            db = None
 
     state = "unhealthy" if findings else "healthy"
     severity = len(findings)
-    detail = " ".join(findings) if findings else "All local health checks passed."
+    codes = sorted(code for code, _ in findings)
+    detail = " ".join(message for _, message in findings) if findings else "All local health checks passed."
+    # The signature carries which conditions are present, not only how many, so a
+    # change of condition at equal severity is still an escalation worth showing.
+    signature = f"{state}:{severity}:{','.join(codes)}"
 
     if db is not None:
         db.execute("INSERT INTO health(timestamp_utc,state,severity,detail) VALUES(?,?,?,?)",
                    (utc_text(), state, severity, detail[:1900]))
         previous_state = get_state(db, "health_last_state") or "healthy"
         previous_severity = int(get_state(db, "health_last_severity") or 0)
+        previous_codes = get_state(db, "health_last_codes") or ""
         set_state(db, "health_last_state", state)
         set_state(db, "health_last_severity", str(severity))
+        set_state(db, "health_last_codes", ",".join(codes))
         db.commit()
     else:
         # Without the database the stamp file is the only memory of the last
         # notification, so a missing database still notifies once, not every run.
-        stamp = read_notification_stamp().split(":")
-        previous_state = stamp[0] if stamp and stamp[0] else "healthy"
-        previous_severity = int(stamp[1]) if len(stamp) > 1 and stamp[1].isdigit() else 0
-    escalating = state == "unhealthy" and (previous_state == "healthy" or severity > previous_severity)
-    if not write_notification_stamp(f"{state}:{severity}") and db is None:
+        parts = read_notification_stamp().split(":")
+        previous_state = parts[0] if parts and parts[0] else "healthy"
+        previous_severity = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        previous_codes = parts[2] if len(parts) > 2 else ""
+    escalating = state == "unhealthy" and (previous_state == "healthy"
+                                           or severity > previous_severity
+                                           or ",".join(codes) != previous_codes)
+    if not write_notification_stamp(signature) and db is None:
         # Without a database and without a stamp there is no memory of the last
         # notification, so say so rather than silently notifying on every run.
         detail = f"{detail} The notification stamp could not be written, so repeat notices are possible."
@@ -221,8 +243,9 @@ def main() -> int:
     if escalating:
         launch_health_notice(detail)
     if args.as_json:
-        print(json.dumps({"state": state, "severity": severity, "findings": findings,
-                          "notified": escalating}, indent=2, sort_keys=True))
+        print(json.dumps({"state": state, "severity": severity, "notified": escalating,
+                          "findings": [{"code": code, "message": message} for code, message in findings]},
+                         indent=2, sort_keys=True))
     if db is not None:
         db.close()
     return 0 if state == "healthy" else 1
