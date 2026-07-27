@@ -72,13 +72,15 @@ def read_notification_stamp() -> str:
         return ""
 
 
-def write_notification_stamp(signature: str) -> None:
+def write_notification_stamp(signature: str) -> bool:
+    """Record the last notified state. Returns False when it could not be written."""
     path = notification_stamp_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(signature, encoding="utf-8")
+        return True
     except OSError:
-        pass
+        return False
 
 
 def check_recent_run(db, threshold_minutes: int) -> list[str]:
@@ -92,16 +94,18 @@ def check_recent_run(db, threshold_minutes: int) -> list[str]:
     return []
 
 
-def check_outbox(db, age_minutes: int, max_attempts: int) -> list[str]:
+def check_outbox(db, age_minutes: int, max_attempts: int, notion_enabled: bool = True) -> list[str]:
     """Report a stalled queue and an exhausted queue as separate conditions.
 
     An exhausted event is never retried, so counting it as a waiting event
-    would hold the health state unhealthy with no action available.
+    would hold the health state unhealthy with no action available. When no
+    remote destination is configured there is no queue to stall either: such
+    events are local records awaiting retention, not a fault.
     """
     findings = []
     row = db.execute("SELECT COUNT(*), MIN(timestamp_utc) FROM events "
                      "WHERE delivered_to_notion=0 AND delivery_attempts < ?", (max_attempts,)).fetchone()
-    if row and row[0]:
+    if notion_enabled and row and row[0]:
         age = utc_now() - datetime.fromisoformat(row[1])
         if age > timedelta(minutes=age_minutes):
             findings.append(f"{row[0]} deliverable events have waited undelivered for "
@@ -132,10 +136,14 @@ def evaluate(db, cfg: dict) -> list[str]:
     outbox_cfg = cfg.get("outbox", {}) if isinstance(cfg.get("outbox"), dict) else {}
     run_threshold = health_cfg.get("run_age_minutes", DEFAULT_RUN_AGE_MINUTES)
     outbox_threshold = health_cfg.get("outbox_age_minutes", DEFAULT_OUTBOX_AGE_MINUTES)
-    max_attempts = int(outbox_cfg.get("max_attempts_per_event", DEFAULT_MAX_ATTEMPTS))
+    try:
+        max_attempts = int(outbox_cfg.get("max_attempts_per_event", DEFAULT_MAX_ATTEMPTS))
+    except (TypeError, ValueError):
+        max_attempts = DEFAULT_MAX_ATTEMPTS
+    notion_enabled = bool(cfg.get("notion", {}).get("enabled", False)) if isinstance(cfg.get("notion"), dict) else False
     findings = []
     for check, arguments in ((check_recent_run, (run_threshold,)),
-                             (check_outbox, (outbox_threshold, max_attempts))):
+                             (check_outbox, (outbox_threshold, max_attempts, notion_enabled))):
         try:
             findings.extend(check(db, *arguments))
         except sqlite3.Error as error:
@@ -204,7 +212,10 @@ def main() -> int:
         previous_state = stamp[0] if stamp and stamp[0] else "healthy"
         previous_severity = int(stamp[1]) if len(stamp) > 1 and stamp[1].isdigit() else 0
     escalating = state == "unhealthy" and (previous_state == "healthy" or severity > previous_severity)
-    write_notification_stamp(f"{state}:{severity}")
+    if not write_notification_stamp(f"{state}:{severity}") and db is None:
+        # Without a database and without a stamp there is no memory of the last
+        # notification, so say so rather than silently notifying on every run.
+        detail = f"{detail} The notification stamp could not be written, so repeat notices are possible."
 
     append_log(log_directory / HEALTH_LOG_NAME, f"{utc_text()} {state} severity={severity} {detail}")
     if escalating:

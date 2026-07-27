@@ -66,6 +66,16 @@ def validate_config(cfg: dict) -> None:
             raise RuntimeError(f"monitor.{key} must be a positive integer.")
     if cfg.get("execution_mode") not in ("dry-run", "execute"):
         raise RuntimeError("execution_mode must be 'dry-run' or 'execute'.")
+    for section, keys in (("outbox", ("max_deliveries_per_run", "max_attempts_per_event", "retention_days")),
+                          ("health", ("run_age_minutes", "outbox_age_minutes"))):
+        values = cfg.get(section)
+        if values is None:
+            continue
+        if not isinstance(values, dict):
+            raise RuntimeError(f"Configuration section '{section}' must be a JSON object when present.")
+        for key in keys:
+            if key in values and (not isinstance(values[key], int) or isinstance(values[key], bool) or values[key] <= 0):
+                raise RuntimeError(f"{section}.{key} must be a positive integer.")
 
 def open_db(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,18 +167,24 @@ def outbox_settings(cfg: dict) -> tuple[int, int, int]:
             int(settings.get("retention_days", 30)))
 
 
-def purge_events(db, retention_days: int, max_attempts: int) -> dict:
-    """Drop delivered events past retention, and undelivered events that have
-    exhausted their retry bound and are also past retention.
+def purge_events(db, retention_days: int, max_attempts: int, notion_enabled: bool = True) -> dict:
+    """Drop every event past retention that can no longer reach its destination.
 
-    Without the second rule an undeliverable event would occupy the queue for
-    ever, because an exhausted event is never retried and was never purged.
+    Three rules, because an event becomes undeliverable in three ways: it was
+    delivered; it exhausted its retry bound; or there is no remote destination
+    configured at all. Without the third rule an install with Notion disabled
+    would keep every event it ever wrote, since such events are neither
+    delivered nor ever attempted.
     """
     cutoff = utc_text(utc_now() - timedelta(days=retention_days))
     delivered = db.execute("DELETE FROM events WHERE delivered_to_notion=1 AND timestamp_utc < ?",
                            (cutoff,)).rowcount
-    abandoned = db.execute("DELETE FROM events WHERE delivered_to_notion=0 AND delivery_attempts >= ? "
-                           "AND timestamp_utc < ?", (max_attempts, cutoff)).rowcount
+    if notion_enabled:
+        abandoned = db.execute("DELETE FROM events WHERE delivered_to_notion=0 AND delivery_attempts >= ? "
+                               "AND timestamp_utc < ?", (max_attempts, cutoff)).rowcount
+    else:
+        abandoned = db.execute("DELETE FROM events WHERE delivered_to_notion=0 AND timestamp_utc < ?",
+                               (cutoff,)).rowcount
     db.commit()
     return {"delivered": delivered, "abandoned": abandoned}
 
@@ -216,7 +232,7 @@ def deliver_outbox(db, cfg: dict) -> dict:
     pending = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0").fetchone()[0]
     exhausted = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0 AND delivery_attempts >= ?",
                            (max_attempts,)).fetchone()[0]
-    purged = purge_events(db, retention_days, max_attempts)
+    purged = purge_events(db, retention_days, max_attempts, notion_is_enabled(cfg))
     return {"delivered": delivered, "pending": pending, "exhausted": exhausted,
             "purged": purged["delivered"], "abandoned": purged["abandoned"], "stopped_on": stopped_on}
 
@@ -274,8 +290,9 @@ def main() -> int:
     online = internet_available(cfg["monitor"]["probe_urls"])
     log_run(db, online, effective_mode, cfg["execution_mode"])
     # Retention runs on every monitoring run, not only when remote delivery is
-    # enabled, so the local event table cannot grow without bound in dry-run.
-    purge_events(db, retention_days, max_attempts)
+    # enabled, so the local event table cannot grow without bound in dry-run or
+    # in an install that never configured Notion.
+    purge_events(db, retention_days, max_attempts, notion_is_enabled(cfg))
     first_failure = get_state(db, "first_failure_utc")
     if online:
         if get_state(db, "pending_recovery_notification"):

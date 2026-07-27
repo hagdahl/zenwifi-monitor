@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory() as temp:
     record("no token is persisted in the error detail",
            "redact-me-0000" not in stored[1] and "<redacted>" in stored[1], f"stored error was {stored[1]!r}")
 
-    # Delivery succeeds: oldest first, exactly once, and a second run re-sends nothing.
+    # Delivery succeeds: oldest first, at least once, and a second run re-sends nothing.
     delivered_order = []
     watchdog.notion_event = lambda cfg, status, action, detail: delivered_order.append(status)
     outcome = watchdog.deliver_outbox(db, CFG)
@@ -94,6 +94,17 @@ with tempfile.TemporaryDirectory() as temp:
            purged["delivered"] == 2 and purged["abandoned"] == 1, f"purged={purged}")
     record("a fresh deliverable event survives retention", remaining == [fresh],
            f"remaining ids={remaining}, fresh={fresh}")
+
+    # With no remote destination an event can never be delivered, so retention
+    # must reclaim it or the table grows for ever in a supported configuration.
+    db.execute("UPDATE events SET timestamp_utc=?", (aged,)); db.commit()
+    kept = watchdog.purge_events(db, 30, 3, notion_enabled=True)
+    still = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    record("with Notion enabled a never-attempted event is kept", still == 1, f"purged={kept} remaining={still}")
+    dropped = watchdog.purge_events(db, 30, 3, notion_enabled=False)
+    still = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    record("with Notion disabled retention reclaims it", dropped["abandoned"] == 1 and still == 0,
+           f"purged={dropped} remaining={still}")
     db.close()
 
 # Bootstrap log rotation is bounded and never truncates the active record.
