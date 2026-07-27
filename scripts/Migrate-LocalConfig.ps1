@@ -8,8 +8,11 @@ The script is a dry-run unless -WriteConfig is supplied. It never contacts the
 router or Notion, reads no credentials, and never enables restart execution.
 
 The migration maps the legacy router https_port setting to management_port,
-records use_tls as true, and adds the explicit Notion enabled flag. Notion
-remains disabled unless it was already enabled or -EnableNotion is supplied.
+records use_tls as true, adds the explicit Notion enabled flag, and adds any
+missing optional section, taking its defaults from config.example.json so the
+template stays the single source of those values. Notion remains disabled
+unless it was already enabled or -EnableNotion is supplied, and execution_mode
+is never changed when it is already present.
 Before writing, the script creates an ignored timestamped backup next to
 config.local.json.
 #>
@@ -63,6 +66,25 @@ if (-not $config.PSObject.Properties['config_version']) {
   $config.config_version = $projectVersion
   $changes.Add("Updated config_version to $projectVersion.")
 }
+$examplePath = Join-Path $projectRoot 'config.example.json'
+if (Test-Path -LiteralPath $examplePath) {
+  $example = Get-Content -LiteralPath $examplePath -Raw | ConvertFrom-Json
+  foreach ($section in @('outbox', 'health')) {
+    if (-not $example.PSObject.Properties[$section]) { continue }
+    if (-not $config.PSObject.Properties[$section]) {
+      $config | Add-Member -NotePropertyName $section -NotePropertyValue $example.$section
+      $changes.Add("Added the $section section with template defaults.")
+    } else {
+      foreach ($property in $example.$section.PSObject.Properties) {
+        if (-not $config.$section.PSObject.Properties[$property.Name]) {
+          $config.$section | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value
+          $changes.Add("Added $section.$($property.Name) with the template default.")
+        }
+      }
+    }
+  }
+}
+
 if (-not $config.PSObject.Properties['execution_mode']) {
   $config | Add-Member -NotePropertyName execution_mode -NotePropertyValue 'dry-run'
   $changes.Add('Set execution_mode to dry-run.')
@@ -74,6 +96,7 @@ else { $changes | ForEach-Object { Write-Host "- $_" } }
 Write-Host "Notion logging after migration: $notionEnabled"
 Write-Host 'Router communication after migration: TLS enabled.'
 Write-Host 'Restart execution after migration: unchanged.'
+Write-Host "Execution mode after migration: $($config.execution_mode)"
 
 if (-not $WriteConfig) {
   Write-Host 'Dry-run only. Re-run with -WriteConfig to create a backup and update config.local.json.'
