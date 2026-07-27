@@ -6,7 +6,7 @@
 
 - Host: Windows 11 with wired Ethernet.
 - Router: ASUSWRT-compatible router through a local HTTPS interface.
-- Project logic: project root.
+- Project logic: `src/` for the Python modules and `scripts/` for the Windows launchers and setup scripts. This deviates from the standard's numbered source tree; ADR-015 records why and `01_docs/ARCHITECTURE.md` carries the mapping and edit status per directory.
 - Operations logs and state: separately configured local path.
 
 ## External dependencies

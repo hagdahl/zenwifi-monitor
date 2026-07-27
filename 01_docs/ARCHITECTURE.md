@@ -15,6 +15,29 @@
 8. Every relevant event is committed to SQLite first. When Notion is enabled and the run is authorized, the outbox delivers undelivered events oldest first, marks each delivered only after a successful response, and stops on the first failure. SQLite remains the primary log.
 9. A separate fifteen-minute health task inspects run freshness, database readability, the bootstrap error log and the outbox backlog, and raises a persistent notification only when the state becomes unhealthy or escalates.
 
+## Repository layout
+
+The layout is adapted from the governing standard's prescribed tree; ADR-015 records the deviation and its reasons.
+The table below was verified against an actual filesystem inventory, not carried over from a template.
+
+| Directory | Contents | Standard's equivalent | Edit status | Classification |
+|---|---|---|---|---|
+| `00_admin/` | Decisions, glossary, handover | `00_admin/` | Editable | Logic |
+| `01_docs/` | Architecture, authentication, user guide, publication, review prompt, improvement plan | `01_docs/` | Editable | Logic |
+| `04_tests/` | Smoke and regression suites | `04_tests/` | Editable | Logic |
+| `src/` | `watchdog.py`, `health.py`, `_logrotate.py` | `03_src/modules` and `03_src/scripts` | Editable | Logic |
+| `scripts/` | PowerShell setup, migration, staging and the VBS launcher | `03_src/scripts` | Editable | Logic |
+| `.github/` | Continuous integration workflow | Not in the tree | Editable | Logic |
+| project root | README, licence, disclaimer, security, changelog, configuration template, `VERSION` | Same | Editable | Logic |
+| `_public/` | Generated history-free publication staging | Not in the tree | Never edited by hand | Derived |
+| `_backups/` | Dated pre-change copies | Not in the tree | Read-only once written | Data |
+| `.venv/` | Project-local Python runtime | Not in the tree | Never touch | External tool state |
+
+There is no `02_data/`, `05_logs/` or `06_exports/`. The project ingests no data and produces no exports, and its only
+persistent runtime state, the SQLite database and the log directory, is placed outside the project tree by ADR-001 so
+that it survives an outage and does not sit in a cloud-synced directory. Everything under `_public/`, `_backups/`,
+`.venv/` and `config.local.json` is ignored by Git.
+
 ## Components
 
 | Component | Responsibility | Data |
