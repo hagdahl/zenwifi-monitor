@@ -20,7 +20,7 @@
 - `Migrate-LocalConfig.ps1` upgrades earlier ignored local configuration safely; it is dry-run by default and writes a timestamped ignored backup only with `-WriteConfig`.
 - `src/health.py` is the local health monitor. It is standard-library only by design, runs on its own `ZenWiFiMonitorHealth` task through the silent wrapper, and can never restart the router. Register it with `Install.ps1 -RegisterHealthTask`.
 - Undelivered Notion events queue in the SQLite `events` table. Inspect `delivered_to_notion`, `delivery_attempts` and `last_delivery_error` when remote logging looks stalled.
-- Bootstrap and health logs rotate at 1 MiB and keep two previous files. Windows writes them under `%LOCALAPPDATA%\ZenWiFiMonitor`; Debian and other POSIX hosts use the home directory.
+- Logs rotate at 1 MiB and keep two previous files. The bootstrap error log and the health notification stamp live under `%LOCALAPPDATA%\ZenWiFiMonitor` on Windows and under the home directory on Debian and other POSIX hosts. The health log itself is written to the configured `paths.log_directory`.
 - The project version lives in the root `VERSION` file. Every tracked file mirrors it; run `python scripts/check_versions.py` after any change and before any release. It needs only the standard library and Git.
 - Bootstrap failures before SQLite opens are recorded at `%LOCALAPPDATA%\ZenWiFiMonitor\bootstrap-errors.log`; this is the first troubleshooting location when regular run rows stop advancing.
 

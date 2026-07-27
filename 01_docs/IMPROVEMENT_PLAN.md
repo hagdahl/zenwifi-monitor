@@ -48,8 +48,10 @@ Use the existing SQLite event delivery state as an outbox.
 Acceptance criteria:
 
 - An Offline event created during an Internet outage is recorded in SQLite.
-- After connectivity returns, Notion receives it exactly once and SQLite marks
-  it delivered.
+- After connectivity returns, Notion receives it at least once and SQLite marks
+  it delivered. Delivery is deliberately at-least-once: a run interrupted
+  between a successful response and the delivered mark resends the event,
+  which is preferred over dropping it.
 - No token, authorization header, or full remote response is persisted.
 
 ## 3. Local health monitor
