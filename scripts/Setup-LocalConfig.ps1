@@ -1,3 +1,4 @@
+# ZenWiFi Monitor version: 0.1.0
 <#
 .SYNOPSIS
 Creates or updates the local ZenWiFi Monitor configuration without storing secrets.

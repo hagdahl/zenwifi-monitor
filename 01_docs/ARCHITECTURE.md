@@ -1,3 +1,5 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # Architecture
 
 ## Flow
@@ -21,3 +23,4 @@
 | VBS wrapper | Silent background execution | None |
 | Windows Credential Manager | Passwords and Notion token | Secrets |
 | Notion (optional) | Remote log of minimized events when enabled | Operations status |
+| Version marking | Single project version in `VERSION`, mirrored into every tracked file and verified by `scripts/check_versions.py` | No operational data |

@@ -1,3 +1,4 @@
+# ZenWiFi Monitor version: 0.1.0
 <#
 .SYNOPSIS
 Safely migrates an earlier local ZenWiFi Monitor configuration to the current schema.
@@ -53,6 +54,14 @@ if (-not $notionWasEnabled) {
 if (-not $config.notion.PSObject.Properties['api_version']) {
   $config.notion | Add-Member -NotePropertyName api_version -NotePropertyValue '2026-03-11'
   $changes.Add('Added the Notion API version.')
+}
+$projectVersion = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
+if (-not $config.PSObject.Properties['config_version']) {
+  $config | Add-Member -NotePropertyName config_version -NotePropertyValue $projectVersion
+  $changes.Add("Added config_version $projectVersion.")
+} elseif ($config.config_version -ne $projectVersion) {
+  $config.config_version = $projectVersion
+  $changes.Add("Updated config_version to $projectVersion.")
 }
 if (-not $config.PSObject.Properties['execution_mode']) {
   $config | Add-Member -NotePropertyName execution_mode -NotePropertyValue 'dry-run'

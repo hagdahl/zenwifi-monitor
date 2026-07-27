@@ -1,3 +1,4 @@
+# ZenWiFi Monitor version: 0.1.0
 import importlib.util
 import gc
 import json

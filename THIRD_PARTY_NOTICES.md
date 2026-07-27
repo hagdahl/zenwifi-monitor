@@ -1,3 +1,5 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # Third-party notices
 
 ZenWiFi Monitor does not vendor third-party source code. Its direct Python

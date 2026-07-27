@@ -1,3 +1,5 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # Public GitHub publication
 
 The source repository's local Git history is private operational history and must never be pushed. Public release uses a separate, history-free `_public` staging tree.

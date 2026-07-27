@@ -1,6 +1,8 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # Changelog
 
-## Unreleased
+## 0.1.0 - Unreleased
 
 ### Added
 
@@ -31,8 +33,10 @@
 - Added a persistent local notification when Internet connectivity is confirmed after a monitor-initiated router restart.
 - Added the explicit `-EnableExecution` task-registration gate and recorded the production-activation decision model.
 - Added a documented plan for durable Notion delivery, local health monitoring, dependency locking, and Debian support.
+- Added project-wide file version marking: a root `VERSION` file as the single source of truth, a version marker in every tracked file, `config_version` in the configuration schema, `scripts/check_versions.py` as a standard-library drift check with `--json` output and exit codes 0/1/2, and a CI gate that fails the build on drift. Affected: `VERSION`, `scripts/check_versions.py`, `04_tests/test_check_versions.py`, `.github/workflows/test.yml`, `scripts/Migrate-LocalConfig.ps1`, `config.example.json` and a one-line marker in every other tracked file. Rationale: the governing standard prescribes no versioning scheme for downstream projects, so the scheme is chosen here and recorded as ADR-011. Verified by running `python scripts/check_versions.py` (ALL GREEN, 30 tracked files checked) and `python 04_tests/test_check_versions.py` against a temporary Git repository covering the green, stale, missing-marker and changelog-drift branches.
 - Hardened Windows PowerShell compatibility, configuration validation, task registration, TLS setup messaging, CI permissions, and bootstrap-failure documentation after independent review.
 
 ### Rollback
 
+- Remove the version marking by reverting the commit that introduced it. The marker lines are comments in every file type except `config.example.json`, where `config_version` is an additive key that `validate_config` ignores, so reverting cannot change monitoring behaviour. Deleting `VERSION` alone makes `check_versions.py` exit 2.
 - Restore the project baseline by removing the local Git commit that introduced the change. No scheduled task, router configuration, or external account was changed in this step.

@@ -1,3 +1,4 @@
+# ZenWiFi Monitor version: 0.1.0
 # Secrets and machine-specific configuration
 config.local
 config.local.json
@@ -24,3 +25,6 @@ logs/
 venv/
 Thumbs.db
 .DS_Store
+
+# Pre-change backups, local only
+_backups/

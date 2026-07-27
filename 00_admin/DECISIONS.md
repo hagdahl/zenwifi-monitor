@@ -1,3 +1,5 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # Decisions and assumptions
 
 | ID | Date | Status | Decision or assumption | Rationale |
@@ -12,3 +14,4 @@
 | ADR-008 | 2026-07-26 | Approved | Local configuration schema migrations are dry-run-first, create an ignored backup before writing, preserve TLS, and require an explicit opt-in for Notion logging. | Migration must not activate external behavior or silently change optional remote logging. |
 | ADR-009 | 2026-07-26 | Approved | Public release uses an ignored, history-free `_public` staging tree generated only from a clean current source tree. | Earlier local Git history contains environment-specific and personal metadata that must never reach the public remote. |
 | ADR-010 | 2026-07-27 | Approved | Production activation requires a separate owner decision, task registration with `-EnableExecution`, and local `execution_mode` set to `execute`. Tests and dry-run must never request a router restart. | The explicit task argument and local configuration are independent activation gates. |
+| ADR-011 | 2026-07-27 | Approved | The project carries a single semantic version in the root `VERSION` file. Every tracked file except `LICENSE` and `VERSION` carries a `ZenWiFi Monitor version: MAJOR.MINOR.PATCH` marker in its native comment syntax; `config.example.json` carries it as a `config_version` key. `scripts/check_versions.py` verifies that all markers and the newest `CHANGELOG.md` release heading equal `VERSION`, and CI fails on drift. Alternatives considered: independent per-file versions, rejected because Git already provides per-file history and per-file counters drift silently; a project version plus per-file revision counters, rejected as unjustified maintenance for a single-maintainer project. Consequence: a release bumps `VERSION`, the CHANGELOG heading and every marker together. | The governing standard prescribes no versioning scheme for downstream projects, so the scheme is a project decision. A single version keeps the marker verifiable mechanically and mirrors how the standard marks its own documents. |

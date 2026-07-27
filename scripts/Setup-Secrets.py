@@ -1,3 +1,4 @@
+# ZenWiFi Monitor version: 0.1.0
 import getpass
 import keyring
 from keyring.backends.Windows import WinVaultKeyring

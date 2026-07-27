@@ -1,3 +1,5 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # Disclaimer
 
 This repository is provided "as is", without warranties or conditions of any kind, whether express, implied, statutory, or otherwise.

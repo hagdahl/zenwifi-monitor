@@ -1,3 +1,5 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # Handover
 
 ## Runtime environment
@@ -16,6 +18,7 @@
 - Notion is optional; SQLite remains the local primary log even when no Notion integration is configured.
 - Direct dependency license and copyright notices are recorded in `THIRD_PARTY_NOTICES.md` and must be reviewed when dependencies change.
 - `Migrate-LocalConfig.ps1` upgrades earlier ignored local configuration safely; it is dry-run by default and writes a timestamped ignored backup only with `-WriteConfig`.
+- The project version lives in the root `VERSION` file. Every tracked file mirrors it; run `python scripts/check_versions.py` after any change and before any release. It needs only the standard library and Git.
 - Bootstrap failures before SQLite opens are recorded at `%LOCALAPPDATA%\ZenWiFiMonitor\bootstrap-errors.log`; this is the first troubleshooting location when regular run rows stop advancing.
 
 ## Recovery

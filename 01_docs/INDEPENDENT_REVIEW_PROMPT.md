@@ -1,3 +1,5 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # Independent pre-publication review prompt
 
 Use this prompt with an independent reviewer agent. Replace `<TARGET_COMMIT>`

@@ -1,3 +1,5 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # ZenWiFi Monitor
 
 ## Data classification and access
@@ -34,6 +36,19 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the preserved copyright
 ## License
 
 Copyright 2026 David Hagdahl. This project is licensed under the [Apache License 2.0](LICENSE). Third-party dependency notices are maintained separately in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Versioning
+
+The project carries one semantic version. The root `VERSION` file is the single source of truth; every tracked file
+except `LICENSE` and `VERSION` mirrors it in a `ZenWiFi Monitor version: MAJOR.MINOR.PATCH` marker written in that
+file's own comment syntax, and `config.example.json` carries the same value as `config_version`. The newest release
+heading in [CHANGELOG.md](CHANGELOG.md) names the same version.
+
+Run `python scripts/check_versions.py` to verify this. It uses only the standard library and Git, reads without
+writing, prints a per-file summary, and accepts `--json` for a machine-readable result. Exit codes are 0 when every
+marker agrees, 1 on drift, and 2 when `VERSION` is missing or malformed or Git cannot list tracked files. The same
+check runs in CI and fails the build on drift. A release bumps `VERSION`, the changelog heading and every marker
+together; see ADR-011 in [00_admin/DECISIONS.md](00_admin/DECISIONS.md).
 
 ## Setup and operation
 

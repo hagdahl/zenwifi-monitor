@@ -1,3 +1,4 @@
+# ZenWiFi Monitor version: 0.1.0
 <#
 .SYNOPSIS
 Discovers and safely records local router settings for ZenWiFi Monitor.

@@ -1,3 +1,4 @@
+# ZenWiFi Monitor version: 0.1.0
 <#
 .SYNOPSIS
 Creates a history-free `_public` staging copy for public GitHub publication.

@@ -1,4 +1,5 @@
 """Local-first ZenWiFi Internet watchdog. Defaults to dry-run."""
+# ZenWiFi Monitor version: 0.1.0
 import argparse
 import asyncio
 import json

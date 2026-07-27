@@ -1,3 +1,4 @@
+# ZenWiFi Monitor version: 0.1.0
 [CmdletBinding()]
 param(
   [switch]$InstallDependencies,

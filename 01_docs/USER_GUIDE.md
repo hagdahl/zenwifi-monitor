@@ -1,3 +1,5 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # User guide
 
 1. Run `Install.ps1 -InstallDependencies` to create the local Python runtime.
@@ -9,4 +11,5 @@
 7. Verify read-only router authentication separately. Do not invoke any restart or configuration endpoint during this test.
 8. If Notion is enabled, create a Notion internal integration, grant it access to the selected data source, then verify a minimized direct Notion write without router action.
 9. Run `Install.ps1 -RegisterTask` only after the dry-run checks pass. Obtain a separate production deployment decision before enabling restart capability. Do not add `--execute` to the VBS wrapper during testing or dry-run.
-10. If a run fails before SQLite opens, inspect `%LOCALAPPDATA%\ZenWiFiMonitor\bootstrap-errors.log`. The silent VBS wrapper does not display standard error output.
+10. Run `python scripts/check_versions.py` to confirm that every tracked file carries the current project version. It prints a per-file summary and exits 0 when green, 1 on drift and 2 when `VERSION` or Git is unavailable. Add `--json` for a machine-readable result.
+11. If a run fails before SQLite opens, inspect `%LOCALAPPDATA%\ZenWiFiMonitor\bootstrap-errors.log`. The silent VBS wrapper does not display standard error output.

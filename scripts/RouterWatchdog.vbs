@@ -1,3 +1,4 @@
+' ZenWiFi Monitor version: 0.1.0
 Set shell = CreateObject("Wscript.Shell")
 root = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
 executionArgument = ""

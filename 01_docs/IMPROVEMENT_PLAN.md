@@ -1,3 +1,5 @@
+<!-- ZenWiFi Monitor version: 0.1.0 -->
+
 # Improvement plan: reliability and Debian support
 
 ## Objective
