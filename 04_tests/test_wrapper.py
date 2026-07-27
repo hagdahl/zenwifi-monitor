@@ -15,11 +15,14 @@ import sys
 from pathlib import Path
 
 WRAPPER = Path(__file__).parents[1] / "scripts" / "RouterWatchdog.vbs"
+# The refused values are deliberately synthetic. A realistic system path here
+# would trip a publication scan on every future run and train the reader to
+# ignore it, so the absolute-path case uses a drive letter that cannot exist.
 REFUSED = [
     "--script=src\\evil.py",
     "--script=..\\..\\evil.py",
     "--script=src\\..\\..\\evil.py",
-    "--script=C:\\Windows\\System32\\evil.py",
+    "--script=X:\\absolute\\evil.py",
     "--script=src/health.py.",
     "--script=src\\health.py ",
     "--script=src\\health.py:stream",
