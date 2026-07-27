@@ -1,7 +1,8 @@
 # ZenWiFi Monitor version: 0.1.0
-"""Regression test for the silent launcher's entry-point whitelist.
+"""Regression test for the silent launcher's argument handling.
 
-Only the refusal cases are exercised. An accepted value makes the wrapper launch
+Only the refusal cases are exercised, covering both a value outside the
+two-entry whitelist and an argument the wrapper does not recognise at all. An accepted value makes the wrapper launch
 the real monitor against the real local configuration, because the wrapper
 resolves both from its own location, so exercising the accept path here would
 run production code as a side effect of the test suite.
@@ -27,6 +28,14 @@ REFUSED = [
     "--script=src\\health.py ",
     "--script=src\\health.py:stream",
     "--script=",
+    # An argument the wrapper does not recognise must be refused, not ignored:
+    # a single-dash typo previously launched the default job silently.
+    "-script=src\\health.py",
+    "--scripts=src\\health.py",
+    "/script:src\\health.py",
+    "--executenow",
+    "--dry-run",
+    "src\\health.py",
 ]
 results = []
 

@@ -188,36 +188,51 @@ in `src/_logrotate.py`. Each can be reverted with every suite still green.
 Closed. `04_tests/test_watchdog.py` now drives `main()` through the delivery
 gate, the failure window and the reboot cooldown; `04_tests/test_outbox.py`
 covers a `rotate_log` that raises; and `04_tests/test_wrapper.py` runs the
-launcher itself through `cscript` and asserts that eight refused argument shapes
+launcher itself through `cscript` and asserts that fourteen refused argument shapes
 each exit 2. Only the refusal cases are exercised, because an accepted value
 makes the wrapper resolve and launch the real monitor against the real local
 configuration. Each pin was verified by reverting the fix in a temporary copy
 and confirming the suite fails: removing the delivery gate, the cooldown check
 and the rotation tolerance each produced a failing assertion.
 
-### F4. A health run that fails after the database opens still dies silently (low)
+### F4. A health run that fails after the database opens still dies silently (low) - closed
 
 The guarded open closes the case where a locked or corrupt database aborted the
 run before any check. A failure in the recording block that follows, a lock
 acquired between open and insert, a full disk, or an unwritable log directory,
 still propagates to the top-level handler and exits 2 with no notification.
 
-Action: wrap the recording and logging block. The findings and the notification
-decision are already computed at that point, so notify first, or tolerate the
-write failure the way the notification stamp already does.
+Closed. Each of the three writes that follow the open is now tolerated rather
+than fatal. A health record that cannot be inserted adds the
+`health-store-unwritable` condition and drops to the database-free path, which
+still reads the notification stamp, so the run keeps its memory of the last
+notice. A closing state write that fails reports the fault and escalates,
+because the findings and the notification decision are already made at that
+point. A health log that cannot be written is reported the same way, on the
+principle that an unattended job unable to record its own evidence is itself a
+fault. All three report unhealthy and exit 1 instead of exiting 2 in silence,
+and each is pinned by a case in `04_tests/test_health.py` that injects the
+failure into an otherwise healthy system.
 
-### F5. Smaller items (low)
+### F5. Smaller items (low) - closed
 
 - A non-numeric `health` threshold raises inside a check, which `evaluate` does
   not catch, so the health run exits 2. `validate_config` rejects such a
   configuration loudly, so the exposure is a hand-edited file, but the health
   monitor's independence goal argues for the same fallback it already uses for
-  the retry bound.
+  the retry bound. Closed by `positive_int` in `src/health.py`, applied to the
+  run age, the outbox age, the retry bound and the notice cooldown; a value that
+  is absent, non-numeric or not positive falls back to the shared default.
 - ADR-012 still describes the wrapper as taking a path relative to the project
-  root, without mentioning the two-entry whitelist that now defines it.
+  root, without mentioning the two-entry whitelist that now defines it. Closed;
+  ADR-012 now names both allowed entry points and the refusal behaviour.
 - The wrapper ignores unrecognized arguments instead of refusing them, so a
   mistyped `-script=` silently launches the default entry point. A strict refusal
-  would match the fail-closed posture the whitelist established.
+  would match the fail-closed posture the whitelist established. Closed; the
+  wrapper exits 2 on any argument other than `--execute` or `--script=`, and
+  `04_tests/test_wrapper.py` covers six unrecognized shapes alongside the eight
+  rejected whitelist values. Both registered tasks pass only accepted arguments,
+  so neither live job is affected.
 
 ### Carried forward from earlier rounds
 
@@ -233,7 +248,10 @@ write failure the way the notification stamp already does.
 1. Notion outbox, bootstrap rotation, and health monitor. Delivered; the outbox,
    the rotation bound and `src/health.py` are in place and the health task is
    registered.
-2. Section 9. F1, F2 and F3 are closed; F4 and F5 remain.
+2. Section 9. F1 to F5 are closed. Only the two items carried forward from
+   earlier rounds remain open: the wrapper discarding the child's exit code
+   and allowing overlapping runs, and hash-locked dependencies, which is
+   step 3.
 3. Platform interfaces and dependency locking.
 4. Debian service, timer, credential, notification, and documentation path.
 5. Cross-platform CI and independent pre-publication review.

@@ -87,6 +87,20 @@ def write_notification_stamp(state: str, severity: int, codes: list[str],
         return False
 
 
+def positive_int(value, fallback: int) -> int:
+    """Read a threshold defensively.
+
+    The watchdog rejects a malformed configuration loudly at start, but the
+    health monitor is the thing that reports when the watchdog is not running,
+    so it must survive a hand-edited value rather than exit on it.
+    """
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if number > 0 else fallback
+
+
 def check_recent_run(db, threshold_minutes: int) -> list[tuple[str, str]]:
     row = db.execute("SELECT timestamp_utc FROM runs ORDER BY id DESC LIMIT 1").fetchone()
     if row is None:
@@ -141,12 +155,9 @@ def check_bootstrap_log(db) -> list[tuple[str, str]]:
 def evaluate(db, cfg: dict) -> list[tuple[str, str]]:
     health_cfg = cfg.get("health", {}) if isinstance(cfg.get("health"), dict) else {}
     outbox_cfg = cfg.get("outbox", {}) if isinstance(cfg.get("outbox"), dict) else {}
-    run_threshold = health_cfg.get("run_age_minutes", RUN_AGE_MINUTES)
-    outbox_threshold = health_cfg.get("outbox_age_minutes", OUTBOX_AGE_MINUTES)
-    try:
-        max_attempts = int(outbox_cfg.get("max_attempts_per_event", MAX_ATTEMPTS_PER_EVENT))
-    except (TypeError, ValueError):
-        max_attempts = MAX_ATTEMPTS_PER_EVENT
+    run_threshold = positive_int(health_cfg.get("run_age_minutes"), RUN_AGE_MINUTES)
+    outbox_threshold = positive_int(health_cfg.get("outbox_age_minutes"), OUTBOX_AGE_MINUTES)
+    max_attempts = positive_int(outbox_cfg.get("max_attempts_per_event"), MAX_ATTEMPTS_PER_EVENT)
     # Delivery needs both a destination and production activation, so an install
     # still held in dry-run has no queue to stall.
     delivery_configured = (bool(cfg.get("notion", {}).get("enabled", False))
@@ -220,20 +231,26 @@ def main() -> int:
     codes = sorted({code for code, _ in findings})
     detail = " ".join(message for _, message in findings) if findings else "All local health checks passed."
     health_cfg = cfg.get("health", {}) if isinstance(cfg.get("health"), dict) else {}
-    try:
-        cooldown = int(health_cfg.get("notice_cooldown_minutes", NOTICE_COOLDOWN_MINUTES))
-    except (TypeError, ValueError):
-        cooldown = NOTICE_COOLDOWN_MINUTES
+    cooldown = positive_int(health_cfg.get("notice_cooldown_minutes"), NOTICE_COOLDOWN_MINUTES)
 
     if db is not None:
-        db.execute("INSERT INTO health(timestamp_utc,state,severity,detail) VALUES(?,?,?,?)",
-                   (utc_text(), state, severity, detail[:1900]))
-        db.commit()
-        previous_state = get_state(db, "health_last_state") or "healthy"
-        previous_codes = [code for code in (get_state(db, "health_last_codes") or "").split(",") if code]
-        last_notice = get_state(db, "health_last_notice_utc")
-        notified_codes = [code for code in (get_state(db, "health_notified_codes") or "").split(",") if code]
-    else:
+        try:
+            db.execute("INSERT INTO health(timestamp_utc,state,severity,detail) VALUES(?,?,?,?)",
+                       (utc_text(), state, severity, detail[:1900]))
+            db.commit()
+            previous_state = get_state(db, "health_last_state") or "healthy"
+            previous_codes = [code for code in (get_state(db, "health_last_codes") or "").split(",") if code]
+            last_notice = get_state(db, "health_last_notice_utc")
+            notified_codes = [code for code in (get_state(db, "health_notified_codes") or "").split(",") if code]
+        except sqlite3.Error as error:
+            # A lock taken between the open and the write, or a full disk, is a
+            # real fault. It must be announced, not exit the run silently.
+            state = "unhealthy"
+            codes = sorted(set(codes) | {"health-store-unwritable"})
+            severity = len(codes)
+            detail = f"{detail} The health record could not be written: {type(error).__name__}."
+            db = None
+    if db is None:
         # Without the database the stamp file is the only memory of the last
         # notification, so a missing database still notifies once, not every run.
         stamp = read_notification_stamp()
@@ -266,18 +283,40 @@ def main() -> int:
         notified_codes = sorted(set(notified_codes) | set(codes))
 
     if db is not None:
-        set_state(db, "health_last_state", state)
-        set_state(db, "health_last_codes", ",".join(codes))
-        if notice_stamp:
-            set_state(db, "health_last_notice_utc", notice_stamp)
-        set_state(db, "health_notified_codes", ",".join(notified_codes))
-        db.commit()
+        try:
+            set_state(db, "health_last_state", state)
+            set_state(db, "health_last_codes", ",".join(codes))
+            if notice_stamp:
+                set_state(db, "health_last_notice_utc", notice_stamp)
+            set_state(db, "health_notified_codes", ",".join(notified_codes))
+            db.commit()
+        except sqlite3.Error as error:
+            # The findings and the notification decision are already made at
+            # this point, so a write that fails here must not end the run
+            # before the notice. Announce the fault instead of swallowing it.
+            state = "unhealthy"
+            detail = f"{detail} The health state could not be recorded: {type(error).__name__}."
+            escalating = True
+            try:
+                db.close()
+            except sqlite3.Error:
+                pass
+            db = None
     if not write_notification_stamp(state, severity, codes, notice_stamp, notified_codes) and db is None:
         # Without a database and without a stamp there is no memory of the last
         # notification, so say so rather than silently notifying on every run.
         detail = f"{detail} The notification stamp could not be written, so repeat notices are possible."
 
-    append_log(log_directory / HEALTH_LOG_NAME, f"{utc_text()} {state} severity={severity} {detail}")
+    try:
+        append_log(log_directory / HEALTH_LOG_NAME, f"{utc_text()} {state} severity={severity} {detail}")
+    except OSError as error:
+        # The notification matters more than the log line, so a log directory
+        # that cannot be written is reported rather than allowed to end the run.
+        # An unattended job that cannot record its own evidence is itself a
+        # fault, so the run reports unhealthy and exits non-zero.
+        state = "unhealthy"
+        detail = f"{detail} The health log could not be written: {type(error).__name__}."
+        escalating = True
     if escalating:
         launch_health_notice(detail)
     if args.as_json:

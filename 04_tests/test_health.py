@@ -208,6 +208,153 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     record("a missing database notifies once, not once per run", len(notices) == 1, f"notices={len(notices)}")
     gc.collect()
 
+# A threshold that is not a positive whole number falls back to the shared
+# default. The health monitor is the thing that reports when the watchdog is
+# not running, so a hand-edited value must not stop it from running at all.
+record("a non-numeric threshold falls back", health.positive_int("fifteen", 15) == 15)
+record("an empty threshold falls back", health.positive_int("", 15) == 15)
+record("a missing threshold falls back", health.positive_int(None, 15) == 15)
+record("a zero threshold falls back", health.positive_int(0, 15) == 15)
+record("a negative threshold falls back", health.positive_int(-5, 15) == 15)
+record("a numeric string threshold is honoured", health.positive_int("30", 15) == 30)
+record("a whole number threshold is honoured", health.positive_int(45, 15) == 45)
+
+
+class FailingConnection:
+    """A connection that fails one statement and forwards the rest.
+
+    This models a lock taken, or a disk filled, between opening the database
+    and writing to it, which is exactly the window the monitor must survive.
+    """
+
+    def __init__(self, real, failing_fragment):
+        self._real = real
+        self._fragment = failing_fragment
+
+    def execute(self, sql, *parameters):
+        if self._fragment in sql:
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.execute(sql, *parameters)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def health_run(config_path):
+    argv = sys.argv
+    try:
+        sys.argv = ["health.py", "--config", str(config_path)]
+        return health.main()
+    finally:
+        sys.argv = argv
+
+
+def healthy_fixture(root):
+    """A database and configuration on which every check passes."""
+    database = root / "state.sqlite3"
+    db = watchdog.open_db(database)
+    watchdog.log_run(db, True, "dry-run", "dry-run")
+    db.commit(); db.close()
+    config_path = root / "config.json"
+    config_path.write_text(json.dumps(
+        {"paths": {"state_database": str(database), "log_directory": str(root)},
+         "health": {"run_age_minutes": 15, "outbox_age_minutes": 180, "notice_cooldown_minutes": 60},
+         "notion": {"enabled": True}, "execution_mode": "execute"}), encoding="utf-8")
+    return database, config_path
+
+
+# A malformed threshold must not abort the run: the monitor still evaluates
+# and still exits on the state it found, using the shared default instead.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp)
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+    database, _ = healthy_fixture(root)
+    config_path = root / "config.json"
+    config_path.write_text(json.dumps(
+        {"paths": {"state_database": str(database), "log_directory": str(root)},
+         "health": {"run_age_minutes": "fifteen", "outbox_age_minutes": None,
+                    "notice_cooldown_minutes": "-"},
+         "outbox": {"max_attempts_per_event": "many"},
+         "notion": {"enabled": True}, "execution_mode": "execute"}), encoding="utf-8")
+    notices = []
+    health.launch_health_notice = lambda detail: notices.append(detail)
+    code = health_run(config_path)
+    record("a malformed threshold does not abort the health run", code == 0, f"exit was {code}")
+    record("a malformed threshold raises no notice on a healthy system",
+           notices == [], f"notices={notices}")
+    gc.collect()
+
+# A write that fails after the database opened must still reach the notice.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp)
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+    database, config_path = healthy_fixture(root)
+    notices = []
+    health.launch_health_notice = lambda detail: notices.append(detail)
+    real_open_db = health.open_db
+    health.open_db = lambda path: FailingConnection(real_open_db(path), "INSERT INTO health")
+    try:
+        code = health_run(config_path)
+    finally:
+        health.open_db = real_open_db
+    record("an unwritable health record exits 1", code == 1, f"exit was {code}")
+    record("an unwritable health record notifies", len(notices) == 1, f"notices={len(notices)}")
+    record("an unwritable health record names the condition",
+           notices and "could not be written" in notices[0], f"detail={notices[:1]}")
+    gc.collect()
+
+# The same holds for the closing state write, which happens after the
+# notification decision is already made.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp)
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+    database, config_path = healthy_fixture(root)
+    notices = []
+    health.launch_health_notice = lambda detail: notices.append(detail)
+    real_set_state = health.set_state
+
+    def refuse(db, key, value):
+        raise sqlite3.OperationalError("database is locked")
+
+    health.set_state = refuse
+    try:
+        code = health_run(config_path)
+    finally:
+        health.set_state = real_set_state
+    record("an unwritable state row exits 1", code == 1, f"exit was {code}")
+    record("an unwritable state row notifies", len(notices) == 1, f"notices={len(notices)}")
+    record("an unwritable state row names the condition",
+           notices and "could not be recorded" in notices[0], f"detail={notices[:1]}")
+    gc.collect()
+
+# A log directory that cannot be written must be reported, not end the run
+# before the notice: the notification matters more than the log line.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp)
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+    database, config_path = healthy_fixture(root)
+    notices = []
+    health.launch_health_notice = lambda detail: notices.append(detail)
+    real_append_log = health.append_log
+
+    def refuse_log(path, line):
+        raise OSError("the log directory is not writable")
+
+    health.append_log = refuse_log
+    try:
+        code = health_run(config_path)
+    finally:
+        health.append_log = real_append_log
+    record("an unwritable health log exits 1", code == 1, f"exit was {code}")
+    record("an unwritable health log still notifies", len(notices) == 1, f"notices={len(notices)}")
+    record("an unwritable health log names the condition",
+           notices and "could not be written" in notices[0], f"detail={notices[:1]}")
+    gc.collect()
+
 print(json.dumps({"suite": "health", "checks": len(results), "failures": 0,
                   "result": "green", "findings": results}, indent=2))
 print("health monitor smoke test: OK")

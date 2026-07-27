@@ -6,6 +6,9 @@
 ' Optional arguments:
 '   --script=<one of the allowed entry points>     default: src\watchdog.py
 '   --execute                                      forwarded to the target script
+' The allowed entry points are exactly src\watchdog.py and src\health.py.
+' Any other --script= value, and any argument not listed above, is refused
+' with exit code 2 so Task Scheduler records the refusal.
 ' Only the project's own entry points may be launched, so the wrapper cannot be
 ' turned into a general silent runner for an arbitrary file.
 Dim shell, fso, root, targetScript, executionArgument, argument, commandLine, candidate, allowed
@@ -26,6 +29,11 @@ For Each argument In WScript.Arguments
       WScript.Quit 2
     End If
     targetScript = candidate
+  Else
+    ' An argument the wrapper does not recognise is refused rather than
+    ' ignored, so a typo such as -script= cannot silently launch the default
+    ' job with an operator believing a different one was started.
+    WScript.Quit 2
   End If
 Next
 commandLine = Chr(34) & root & "\..\.venv\Scripts\python.exe" & Chr(34) & " " & _
