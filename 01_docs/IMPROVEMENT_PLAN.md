@@ -258,24 +258,57 @@ failure into an otherwise healthy system.
   rejected whitelist values. Both registered tasks pass only accepted arguments,
   so neither live job is affected.
 
+### F6. The health monitor shares the launcher's fate (medium)
+
+Found in operation on 2026-07-27, not by review. The health monitor exists to
+report faults the watchdog cannot report about itself, and it is registered
+through the same silent launcher on the same host. When the launcher failed,
+because the interpreter had been moved out from under it, both jobs failed
+identically and for the same reason. Each left an invisible script-host dialog
+that held its task open, so the single-instance policy then refused every later
+trigger. The observer was blind to exactly the fault it exists to observe, and
+nothing said so for roughly forty minutes.
+
+The launcher now refuses rather than launching what is not there, and records
+the refusal, so this specific cause is closed. The structural point is not: an
+observer that shares its subject's start path is not independent against faults
+in that start path, and the project currently claims independence without
+qualifying it.
+
+Action, for an owner decision rather than an implementation to be assumed:
+
+- state the shared failure mode plainly in `01_docs/ARCHITECTURE.md` and
+  `00_admin/HANDOVER.md`, so nobody over-trusts the monitor; or
+- give the health job a different start mechanism from the watchdog, so a fault
+  in one launcher cannot silence both; or
+- add an observer outside this host entirely, which is the only option that also
+  covers the machine being off, and the only one that costs a new moving part.
+
+The first is cheap and honest. The third is what the failure actually argues
+for. Recording the choice matters more than which is chosen.
+
 ### Carried forward from earlier rounds
 
 - A valid launch through the wrapper still discards the child's exit code, and
   the wrapper returns before the child, so the task's single-instance policy does
-  not prevent overlapping monitor processes. Overlapping delivery runs have no
-  per-row claim and could deliver twice. The health monitor compensates by
-  observing run freshness rather than exit codes.
-- Dependencies are pinned by version but not by hash, as `README.md` records.
+  not prevent overlapping monitor processes. The *harm* is closed: an exclusive
+  run lease in SQLite means two runs cannot both proceed, so overlapping delivery
+  and the double delivery it allowed can no longer happen, and the lease works
+  the same under `systemd` later. The exit code is still discarded, deliberately:
+  making the launcher wait would let one hung run block every later trigger,
+  which is the worse failure. A run that fails is detected by its missing `runs`
+  row, which the health monitor already reports as a stale run.
+- Dependencies are hash-locked as of `requirements.lock.txt`; this entry
+  previously said they were pinned by version only and is now closed.
 
 ## Implementation order
 
 1. Notion outbox, bootstrap rotation, and health monitor. Delivered; the outbox,
    the rotation bound and `src/health.py` are in place and the health task is
    registered.
-2. Section 9. F1 to F5 are closed. Only the two items carried forward from
-   earlier rounds remain open: the wrapper discarding the child's exit code
-   and allowing overlapping runs, and hash-locked dependencies, which is
-   step 3.
+2. Section 9. F1 to F6 are closed except F6's remedy, which is a decision for
+   the owner. The carried-forward items are closed too: overlapping runs are
+   prevented by the run lease, and dependencies are hash-locked.
 3. Platform interfaces and dependency locking. Dependency locking is
    delivered. The platform seam in section 1 is delivered; what remains of
    section 1 is the deployment half, which belongs with step 4.

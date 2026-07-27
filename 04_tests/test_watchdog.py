@@ -149,4 +149,64 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     assert events(database, "Dry-run") == 1, "an elapsed cooldown must allow the decision again"
     gc.collect()
 
+# --- the run lease -----------------------------------------------------------
+# The scheduler cannot enforce one run at a time: the silent launcher returns
+# before its child, so the task reads as finished while the run is still going.
+# Two concurrent runs would each drain the outbox and an event would be
+# delivered twice. These cases pin the lease that closes it, including that a
+# stale lease is reclaimed, because a lock a crashed run can hold for ever
+# would replace double delivery with no monitoring at all.
+
+def runs_recorded(database):
+    db = watchdog.open_db(database)
+    count = db.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    db.close()
+    gc.collect()
+    return count
+
+
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, True)
+    assert call_main(config) == 0
+    assert runs_recorded(database) == 1, "a normal run must record itself"
+
+    # A normal run releases the lease, so the next one proceeds.
+    assert call_main(config) == 0
+    assert runs_recorded(database) == 2, "the lease must be released after a run"
+
+    # A lease held by a live run makes the next run skip without recording.
+    db = watchdog.open_db(database)
+    watchdog.acquire_run_lease(db, "someone-else", watchdog.RUN_LEASE_MINUTES)
+    db.close(); gc.collect()
+    assert call_main(config) == 0, "a skipped run is not an error"
+    assert runs_recorded(database) == 2, "a run must not proceed while another holds the lease"
+
+    db = watchdog.open_db(database)
+    assert watchdog.get_state(db, "last_skipped_run_utc"), "a skip must leave evidence"
+    db.close(); gc.collect()
+
+    # A lease older than the bound is taken over, so a killed run cannot stop
+    # monitoring for ever.
+    stale = watchdog.utc_text(watchdog.utc_now() - timedelta(minutes=watchdog.RUN_LEASE_MINUTES + 1))
+    db = watchdog.open_db(database)
+    db.execute("UPDATE run_lease SET acquired_utc = ? WHERE id = 1", (stale,)); db.commit()
+    db.close(); gc.collect()
+    assert call_main(config) == 0
+    assert runs_recorded(database) == 3, "a stale lease must be reclaimed"
+
+    # A run that lost its lease to a later owner must not delete that owner's
+    # lease when it finishes.
+    db = watchdog.open_db(database)
+    watchdog.acquire_run_lease(db, "later-owner", watchdog.RUN_LEASE_MINUTES)
+    watchdog.release_run_lease(db, "earlier-owner")
+    held = db.execute("SELECT owner FROM run_lease WHERE id = 1").fetchone()
+    assert held is not None and held[0] == "later-owner", "release must be owner-scoped"
+    db.close(); gc.collect()
+
+    # A malformed bound falls back to the shared default rather than raising
+    # inside a monitoring run.
+    assert watchdog.run_lease_minutes({"monitor": {"run_lease_minutes": "soon"}}) == watchdog.RUN_LEASE_MINUTES
+    assert watchdog.run_lease_minutes({"monitor": {"run_lease_minutes": 0}}) == watchdog.RUN_LEASE_MINUTES
+    assert watchdog.run_lease_minutes({"monitor": {"run_lease_minutes": 3}}) == 3
+
 print("watchdog storage smoke test: OK")

@@ -2,6 +2,7 @@
 # ZenWiFi Monitor version: 0.1.0
 import argparse
 import asyncio
+import os
 import json
 import re
 import sqlite3
@@ -12,7 +13,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _defaults import MAX_ATTEMPTS_PER_EVENT, MAX_DELIVERIES_PER_RUN, RETENTION_DAYS  # noqa: E402
+from _defaults import (MAX_ATTEMPTS_PER_EVENT, MAX_DELIVERIES_PER_RUN,  # noqa: E402
+                       RETENTION_DAYS, RUN_LEASE_MINUTES)
 from _logrotate import append_log, bootstrap_log_path  # noqa: E402
 from _platform import LEVEL_INFO, LEVEL_WARNING, show_notice, spawn_detached, windowless_interpreter  # noqa: E402
 from _secrets import SERVICE, get_secret, require_persistent_secret_store  # noqa: E402
@@ -91,6 +93,10 @@ def open_db(path: Path) -> sqlite3.Connection:
             db.execute(f"ALTER TABLE events ADD COLUMN {column} {definition}")
     db.execute("CREATE TABLE IF NOT EXISTS health (id INTEGER PRIMARY KEY, timestamp_utc TEXT NOT NULL, "
                "state TEXT NOT NULL, severity INTEGER NOT NULL, detail TEXT NOT NULL)")
+    # One row at most. The single-row constraint is the lock: two runs cannot
+    # both believe they hold it, whatever the scheduler or the launcher does.
+    db.execute("CREATE TABLE IF NOT EXISTS run_lease (id INTEGER PRIMARY KEY CHECK (id = 1), "
+               "owner TEXT NOT NULL, acquired_utc TEXT NOT NULL)")
     db.commit()
     return db
 
@@ -233,6 +239,74 @@ def deliver_outbox(db, cfg: dict) -> dict:
             "purged": purged["delivered"], "abandoned": purged["abandoned"], "stopped_on": stopped_on}
 
 
+def lease_owner() -> str:
+    """Identify this run well enough to tell a stale lease from a live one."""
+    return f"{os.getpid()}@{utc_text()}"
+
+
+def run_lease_minutes(cfg: dict) -> int:
+    """The lease bound, falling back to the shared default on a bad value."""
+    try:
+        value = int(cfg.get("monitor", {}).get("run_lease_minutes", RUN_LEASE_MINUTES))
+    except (TypeError, ValueError):
+        return RUN_LEASE_MINUTES
+    return value if value > 0 else RUN_LEASE_MINUTES
+
+
+def acquire_run_lease(db, owner: str, minutes: int) -> bool:
+    """Take the exclusive right to run, or report that another run holds it.
+
+    The scheduler's own single-instance policy cannot be relied on: the silent
+    launcher returns before its child, so the task is finished while the run is
+    still going and the next trigger starts a second one. Two concurrent runs
+    would each drain the outbox, and an event delivered by both is delivered
+    twice. The lease closes that regardless of how the run was started, which
+    also means it keeps working under systemd later.
+
+    A lease older than the bound is taken over. A run killed without releasing
+    must not stop monitoring for ever, and stealing a stale lease is safer than
+    honouring one whose owner may no longer exist.
+    """
+    cutoff = utc_now() - timedelta(minutes=minutes)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT owner, acquired_utc FROM run_lease WHERE id = 1").fetchone()
+        if row is not None:
+            try:
+                held_since = datetime.fromisoformat(row[1])
+            except (TypeError, ValueError):
+                held_since = None
+            # An unparseable timestamp is treated as stale rather than as a
+            # permanent lock, so a corrupt row cannot silently stop monitoring.
+            if held_since is not None and held_since > cutoff:
+                db.rollback()
+                return False
+        db.execute("INSERT INTO run_lease (id, owner, acquired_utc) VALUES (1, ?, ?) "
+                   "ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, "
+                   "acquired_utc = excluded.acquired_utc", (owner, utc_text()))
+        db.commit()
+        return True
+    except sqlite3.OperationalError:
+        # Another run holds the write lock at this instant. That is itself
+        # evidence of a concurrent run, so decline rather than wait.
+        return False
+
+
+def release_run_lease(db, owner: str) -> None:
+    """Release the lease, but only if this run still owns it.
+
+    A run whose lease was stolen while it was slow must not delete the new
+    owner's lease on its way out.
+    """
+    try:
+        db.execute("DELETE FROM run_lease WHERE id = 1 AND owner = ?", (owner,))
+        db.commit()
+    except sqlite3.Error:
+        # The next run reclaims the lease once it goes stale, so failing to
+        # release is recoverable and must not mask the run's own outcome.
+        pass
+
+
 def notion_is_enabled(cfg: dict) -> bool:
     """Notion is an optional secondary log destination; SQLite is always primary."""
     return bool(cfg.get("notion", {}).get("enabled", False))
@@ -293,48 +367,74 @@ def main() -> int:
     require_persistent_secret_store(); cfg = load_config(args.config); validate_config(cfg); db = open_db(Path(cfg["paths"]["state_database"]))
     _, max_attempts, retention_days = outbox_settings(cfg)
     if args.reset_outbox_attempts:
-        reset = reset_exhausted_events(db, max_attempts)
-        print(f"Cleared the retry bound on {reset} outbox events.")
+        # This branch mutates the same rows a delivery run reads, so it takes
+        # the lease as well. Unlike a monitoring run it says so out loud and
+        # fails, because an operator running it by hand needs to know it did
+        # nothing rather than to be told a silent zero.
+        owner = lease_owner()
+        if not acquire_run_lease(db, owner, run_lease_minutes(cfg)):
+            print("A monitoring run is in progress; no outbox event was changed. Try again shortly.")
+            return 1
+        try:
+            reset = reset_exhausted_events(db, max_attempts)
+            print(f"Cleared the retry bound on {reset} outbox events.")
+            return 0
+        finally:
+            release_run_lease(db, owner)
+    # The lease is taken before any monitoring work and released in the finally
+    # below, so an early return, a raised exception and a normal end all release
+    # it on the same path.
+    owner = lease_owner()
+    if not acquire_run_lease(db, owner, run_lease_minutes(cfg)):
+        # Another run is in progress. Skipping is the correct outcome, not an
+        # error: the run that holds the lease is doing the work. The skip is
+        # recorded so a lease that is taken every cycle is visible as evidence
+        # rather than only as absent runs.
+        set_state(db, "last_skipped_run_utc", utc_text()); db.commit()
         return 0
-    effective_mode = "execute" if args.execute and cfg["execution_mode"] == "execute" else "dry-run"
-    online = internet_available(cfg["monitor"]["probe_urls"])
-    log_run(db, online, effective_mode, cfg["execution_mode"])
-    # Retention runs on every monitoring run, not only when remote delivery is
-    # enabled, so the local event table cannot grow without bound in dry-run or
-    # in an install that never configured Notion.
-    purge_events(db, retention_days, max_attempts, delivery_is_configured(cfg))
-    first_failure = get_state(db, "first_failure_utc")
-    if online:
-        if get_state(db, "pending_recovery_notification"):
-            launch_recovery_notice()
-            set_state(db, "pending_recovery_notification", "")
-        if first_failure:
-            detail = "Internet connectivity has been restored."
-            log_event(db, "Online", "Restored", detail)
-        if effective_mode == "execute" and notion_is_enabled(cfg):
-            deliver_outbox(db, cfg)
-        set_state(db, "first_failure_utc", ""); db.commit(); return 0
-    if not first_failure:
-        detail = "All external HTTPS probes failed."
-        set_state(db, "first_failure_utc", utc_text()); log_event(db, "Offline", "Monitoring started", detail)
-        return 0
-    failure_age = utc_now() - datetime.fromisoformat(first_failure)
-    if failure_age < timedelta(minutes=cfg["monitor"]["failure_minutes_before_reboot"]): return 0
-    last_attempt = get_state(db, "last_reboot_attempt_utc")
-    if last_attempt and utc_now() - datetime.fromisoformat(last_attempt) < timedelta(minutes=cfg["monitor"]["reboot_cooldown_minutes"]): return 0
-    if effective_mode != "execute":
-        set_state(db, "last_reboot_attempt_utc", utc_text())
-        log_event(db, "Offline", "Dry-run", "Restart condition met; no external action in dry-run."); return 0
-    set_state(db, "last_reboot_attempt_utc", utc_text()); db.commit()
-    launch_reboot_notice()
     try:
-        if not asyncio.run(reboot_router(cfg)): raise RuntimeError("The router rejected the restart request.")
-    except Exception as error:
-        log_event(db, "Error", "Restart failed", str(error)); return 1
-    set_state(db, "last_reboot_utc", utc_text()); set_state(db, "pending_recovery_notification", "1"); set_state(db, "first_failure_utc", ""); log_event(db, "Restarted", "Router restarted", "Internet was unavailable for at least 15 minutes.")
-    if notion_is_enabled(cfg):
-        deliver_outbox(db, cfg)
-    return 0
+        effective_mode = "execute" if args.execute and cfg["execution_mode"] == "execute" else "dry-run"
+        online = internet_available(cfg["monitor"]["probe_urls"])
+        log_run(db, online, effective_mode, cfg["execution_mode"])
+        # Retention runs on every monitoring run, not only when remote delivery is
+        # enabled, so the local event table cannot grow without bound in dry-run or
+        # in an install that never configured Notion.
+        purge_events(db, retention_days, max_attempts, delivery_is_configured(cfg))
+        first_failure = get_state(db, "first_failure_utc")
+        if online:
+            if get_state(db, "pending_recovery_notification"):
+                launch_recovery_notice()
+                set_state(db, "pending_recovery_notification", "")
+            if first_failure:
+                detail = "Internet connectivity has been restored."
+                log_event(db, "Online", "Restored", detail)
+            if effective_mode == "execute" and notion_is_enabled(cfg):
+                deliver_outbox(db, cfg)
+            set_state(db, "first_failure_utc", ""); db.commit(); return 0
+        if not first_failure:
+            detail = "All external HTTPS probes failed."
+            set_state(db, "first_failure_utc", utc_text()); log_event(db, "Offline", "Monitoring started", detail)
+            return 0
+        failure_age = utc_now() - datetime.fromisoformat(first_failure)
+        if failure_age < timedelta(minutes=cfg["monitor"]["failure_minutes_before_reboot"]): return 0
+        last_attempt = get_state(db, "last_reboot_attempt_utc")
+        if last_attempt and utc_now() - datetime.fromisoformat(last_attempt) < timedelta(minutes=cfg["monitor"]["reboot_cooldown_minutes"]): return 0
+        if effective_mode != "execute":
+            set_state(db, "last_reboot_attempt_utc", utc_text())
+            log_event(db, "Offline", "Dry-run", "Restart condition met; no external action in dry-run."); return 0
+        set_state(db, "last_reboot_attempt_utc", utc_text()); db.commit()
+        launch_reboot_notice()
+        try:
+            if not asyncio.run(reboot_router(cfg)): raise RuntimeError("The router rejected the restart request.")
+        except Exception as error:
+            log_event(db, "Error", "Restart failed", str(error)); return 1
+        set_state(db, "last_reboot_utc", utc_text()); set_state(db, "pending_recovery_notification", "1"); set_state(db, "first_failure_utc", ""); log_event(db, "Restarted", "Router restarted", "Internet was unavailable for at least 15 minutes.")
+        if notion_is_enabled(cfg):
+            deliver_outbox(db, cfg)
+        return 0
+    finally:
+        release_run_lease(db, owner)
+
 
 if __name__ == "__main__":
     try: raise SystemExit(main())

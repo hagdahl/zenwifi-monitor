@@ -26,5 +26,10 @@ venv/
 Thumbs.db
 .DS_Store
 
-# Pre-change backups, local only
+# Pre-change backups, local only. The rule is deliberately general: the
+# existing config.local.json.*.bak files were ignored only because they
+# matched the config pattern, so a backup of any other file was
+# committable. Backups are made routinely before edits, so that was a
+# question of when, not whether.
 _backups/
+*.bak

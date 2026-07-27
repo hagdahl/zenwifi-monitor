@@ -13,6 +13,7 @@
   "monitor": {
     "failure_minutes_before_reboot": 15,
     "reboot_cooldown_minutes": 30,
+    "run_lease_minutes": 10,
     "probe_urls": [
       "https://www.msftconnecttest.com/connecttest.txt",
       "https://www.cloudflare.com/cdn-cgi/trace"
