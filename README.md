@@ -64,7 +64,7 @@ Before public release, use [01_docs/INDEPENDENT_REVIEW_PROMPT.md](01_docs/INDEPE
 - Every authenticated interface uses Windows Credential Manager through Keyring. Environment variables, configuration files, and command-line arguments are not used for secrets.
 - Router management uses HTTPS/TLS by default. The setup helper permits HTTP only after an explicit, exact interactive risk acknowledgement when TLS is unavailable.
 - A restart may occur only after at least 15 minutes of continuous external probe failures and is protected against restart loops.
-- A restart shows a persistent notification; all other runs are silent and observable through the local log.
+- A restart and its later confirmed recovery each show a persistent notification; all other runs are silent and observable through the local log.
 - Failures before the configured SQLite database opens are recorded in `%LOCALAPPDATA%\ZenWiFiMonitor\bootstrap-errors.log`; check that file when the normal run log stops advancing.
 - Read [DISCLAIMER.md](DISCLAIMER.md) before using this project.
 

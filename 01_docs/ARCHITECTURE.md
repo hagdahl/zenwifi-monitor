@@ -9,7 +9,8 @@
 4. Two independent HTTPS probes determine whether Internet connectivity exists.
 5. Results and state are stored atomically on the local log disk.
 6. After 15 continuous failure minutes, the monitor establishes an authenticated router session and at most one router restart occurs per cooldown window when `--execute` and standing authorization apply. The session is closed afterwards.
-7. When explicitly enabled, each relevant event is also logged in Notion with data minimization. SQLite remains the primary log.
+7. After a successful monitor-initiated restart, the next confirmed online result shows a persistent local recovery notification.
+8. When explicitly enabled, each relevant event is also logged in Notion with data minimization. SQLite remains the primary log.
 
 ## Components
 

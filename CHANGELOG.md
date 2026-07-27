@@ -28,6 +28,7 @@
 - Added the Apache-2.0 project license with David Hagdahl as copyright owner.
 - Added a dry-run-first local configuration migration and a commit-bound independent pre-publication review prompt.
 - Added a history-free `_public` staging workflow for public GitHub publication.
+- Added a persistent local notification when Internet connectivity is confirmed after a monitor-initiated router restart.
 - Hardened Windows PowerShell compatibility, configuration validation, task registration, TLS setup messaging, CI permissions, and bootstrap-failure documentation after independent review.
 
 ### Rollback

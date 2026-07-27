@@ -134,17 +134,27 @@ def visible_reboot_notice():
     import ctypes
     ctypes.windll.user32.MessageBoxW(0, "Internet has been unavailable for at least 15 minutes. The router is now restarting.", "Router Watchdog", 0x30)
 
+def visible_recovery_notice():
+    import ctypes
+    ctypes.windll.user32.MessageBoxW(0, "Internet connectivity has been restored after the router restart.", "Router Watchdog", 0x40)
+
 def launch_reboot_notice() -> None:
     subprocess.Popen([sys.executable, __file__, "--notice"], close_fds=True)
+
+def launch_recovery_notice() -> None:
+    subprocess.Popen([sys.executable, __file__, "--recovery-notice"], close_fds=True)
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path)
     parser.add_argument("--execute", action="store_true", help="Allows authorized router and Notion actions.")
     parser.add_argument("--notice", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--recovery-notice", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.notice:
         visible_reboot_notice(); return 0
+    if args.recovery_notice:
+        visible_recovery_notice(); return 0
     if args.config is None:
         raise RuntimeError("--config is required for a monitoring run.")
     require_persistent_secret_store(); cfg = load_config(args.config); validate_config(cfg); db = open_db(Path(cfg["paths"]["state_database"]))
@@ -153,6 +163,9 @@ def main() -> int:
     log_run(db, online, effective_mode, cfg["execution_mode"])
     first_failure = get_state(db, "first_failure_utc")
     if online:
+        if get_state(db, "pending_recovery_notification"):
+            launch_recovery_notice()
+            set_state(db, "pending_recovery_notification", "")
         if first_failure:
             detail = "Internet connectivity has been restored."
             log_event(db, "Online", "Restored", detail)
@@ -180,7 +193,7 @@ def main() -> int:
         if not asyncio.run(reboot_router(cfg)): raise RuntimeError("The router rejected the restart request.")
     except Exception as error:
         log_event(db, "Error", "Restart failed", str(error)); return 1
-    set_state(db, "last_reboot_utc", utc_text()); set_state(db, "first_failure_utc", ""); log_event(db, "Restarted", "Router restarted", "Internet was unavailable for at least 15 minutes.")
+    set_state(db, "last_reboot_utc", utc_text()); set_state(db, "pending_recovery_notification", "1"); set_state(db, "first_failure_utc", ""); log_event(db, "Restarted", "Router restarted", "Internet was unavailable for at least 15 minutes.")
     if notion_is_enabled(cfg):
         try: notion_event(cfg, "Restarted", "Router restarted", "Internet was unavailable for at least 15 minutes.")
         except Exception as error: log_event(db, "Error", "Notion logging failed", str(error))
