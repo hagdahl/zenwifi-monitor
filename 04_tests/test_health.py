@@ -58,6 +58,15 @@ with tempfile.TemporaryDirectory() as temp:
     db.commit()
     findings = health.evaluate(db, cfg)
     record("a stalled outbox is reported", any("undelivered" in item for item in findings), f"findings={findings}")
+
+    # An exhausted event is reported as its own actionable condition, not as a
+    # waiting event, so it cannot hold the state unhealthy with nothing to do.
+    db.execute("UPDATE events SET delivery_attempts=99"); db.commit()
+    findings = health.evaluate(db, cfg)
+    record("an exhausted event is not counted as waiting",
+           not any("waited undelivered" in item for item in findings), f"findings={findings}")
+    record("an exhausted event is reported with a remedy",
+           any("--reset-outbox-attempts" in item for item in findings), f"findings={findings}")
     db.close()
 
     # The full run records state, writes the health log, and returns non-zero when unhealthy.
@@ -87,6 +96,32 @@ with tempfile.TemporaryDirectory() as temp:
     finally:
         sys.argv = argv
     record("a steady unhealthy state does not renotify", len(notices) == 1, f"notices={notices}")
+
+# A missing database must still notify once, not on every single run.
+with tempfile.TemporaryDirectory() as temp:
+    root = Path(temp)
+    cfg = {"paths": {"state_database": str(root / "absent.sqlite3"), "log_directory": str(root)}}
+    config_path = root / "config.json"; config_path.write_text(json.dumps(cfg), encoding="utf-8")
+    stamp = health.notification_stamp_path()
+    previous_stamp = stamp.read_text(encoding="utf-8") if stamp.is_file() else None
+    try:
+        health.write_notification_stamp("healthy:0")
+        notices = []
+        health.launch_health_notice = lambda detail: notices.append(detail)
+        for _ in range(3):
+            argv = sys.argv
+            try:
+                sys.argv = ["health.py", "--config", str(config_path)]
+                code = health.main()
+            finally:
+                sys.argv = argv
+        record("a missing database exits 1", code == 1, f"exit was {code}")
+        record("a missing database notifies once, not once per run", len(notices) == 1, f"notices={len(notices)}")
+    finally:
+        if previous_stamp is None:
+            stamp.unlink(missing_ok=True)
+        else:
+            stamp.write_text(previous_stamp, encoding="utf-8")
 
 print(json.dumps({"suite": "health", "checks": len(results), "failures": 0,
                   "result": "green", "findings": results}, indent=2))

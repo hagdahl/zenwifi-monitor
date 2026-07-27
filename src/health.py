@@ -22,6 +22,7 @@ from _logrotate import append_log, bootstrap_log_path  # noqa: E402
 
 DEFAULT_RUN_AGE_MINUTES = 15
 DEFAULT_OUTBOX_AGE_MINUTES = 180
+DEFAULT_MAX_ATTEMPTS = 5
 HEALTH_LOG_NAME = "health.log"
 
 
@@ -59,58 +60,90 @@ def set_state(db, key, value) -> None:
                (key, value))
 
 
-def check_recent_run(db, threshold_minutes: int) -> str | None:
+def notification_stamp_path() -> Path:
+    """A last-notified marker that survives the local database being absent."""
+    return bootstrap_log_path().with_name("health-notified.txt")
+
+
+def read_notification_stamp() -> str:
+    try:
+        return notification_stamp_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def write_notification_stamp(signature: str) -> None:
+    path = notification_stamp_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(signature, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def check_recent_run(db, threshold_minutes: int) -> list[str]:
     row = db.execute("SELECT timestamp_utc FROM runs ORDER BY id DESC LIMIT 1").fetchone()
     if row is None:
-        return "The runs table holds no monitoring run at all."
+        return ["The runs table holds no monitoring run at all."]
     age = utc_now() - datetime.fromisoformat(row[0])
     if age > timedelta(minutes=threshold_minutes):
-        return f"The newest monitoring run is {int(age.total_seconds() // 60)} minutes old; the threshold is {threshold_minutes}."
-    return None
+        return [f"The newest monitoring run is {int(age.total_seconds() // 60)} minutes old; "
+                f"the threshold is {threshold_minutes}."]
+    return []
 
 
-def check_outbox(db, age_minutes: int) -> str | None:
-    row = db.execute(
-        "SELECT COUNT(*), MIN(timestamp_utc) FROM events WHERE delivered_to_notion=0"
-    ).fetchone()
-    if not row or not row[0]:
-        return None
-    age = utc_now() - datetime.fromisoformat(row[1])
-    if age > timedelta(minutes=age_minutes):
-        return f"{row[0]} events have waited undelivered for {int(age.total_seconds() // 60)} minutes."
-    return None
+def check_outbox(db, age_minutes: int, max_attempts: int) -> list[str]:
+    """Report a stalled queue and an exhausted queue as separate conditions.
+
+    An exhausted event is never retried, so counting it as a waiting event
+    would hold the health state unhealthy with no action available.
+    """
+    findings = []
+    row = db.execute("SELECT COUNT(*), MIN(timestamp_utc) FROM events "
+                     "WHERE delivered_to_notion=0 AND delivery_attempts < ?", (max_attempts,)).fetchone()
+    if row and row[0]:
+        age = utc_now() - datetime.fromisoformat(row[1])
+        if age > timedelta(minutes=age_minutes):
+            findings.append(f"{row[0]} deliverable events have waited undelivered for "
+                            f"{int(age.total_seconds() // 60)} minutes.")
+    exhausted = db.execute("SELECT COUNT(*) FROM events "
+                           "WHERE delivered_to_notion=0 AND delivery_attempts >= ?",
+                           (max_attempts,)).fetchone()[0]
+    if exhausted:
+        findings.append(f"{exhausted} events exhausted their delivery retries. Fix the remote destination, "
+                        "then run the watchdog once with --reset-outbox-attempts.")
+    return findings
 
 
-def check_bootstrap_log(db) -> str | None:
+def check_bootstrap_log(db) -> list[str]:
     path = bootstrap_log_path()
     if not path.is_file():
-        return None
+        return []
     stamp = f"{path.stat().st_mtime_ns}:{path.stat().st_size}"
     previous = get_state(db, "health_bootstrap_stamp")
     set_state(db, "health_bootstrap_stamp", stamp)
     if previous is not None and previous != stamp:
-        return f"The bootstrap error log changed since the previous health check: {path}"
-    return None
+        return [f"The bootstrap error log changed since the previous health check: {path.name}"]
+    return []
 
 
 def evaluate(db, cfg: dict) -> list[str]:
     health_cfg = cfg.get("health", {}) if isinstance(cfg.get("health"), dict) else {}
+    outbox_cfg = cfg.get("outbox", {}) if isinstance(cfg.get("outbox"), dict) else {}
     run_threshold = health_cfg.get("run_age_minutes", DEFAULT_RUN_AGE_MINUTES)
     outbox_threshold = health_cfg.get("outbox_age_minutes", DEFAULT_OUTBOX_AGE_MINUTES)
+    max_attempts = int(outbox_cfg.get("max_attempts_per_event", DEFAULT_MAX_ATTEMPTS))
     findings = []
-    for check, argument in ((check_recent_run, run_threshold), (check_outbox, outbox_threshold)):
+    for check, arguments in ((check_recent_run, (run_threshold,)),
+                             (check_outbox, (outbox_threshold, max_attempts))):
         try:
-            finding = check(db, argument)
+            findings.extend(check(db, *arguments))
         except sqlite3.Error as error:
-            finding = f"{check.__name__} could not read the local database: {error}"
-        if finding:
-            findings.append(finding)
+            findings.append(f"{check.__name__} could not read the local database: {error}")
     try:
-        finding = check_bootstrap_log(db)
+        findings.extend(check_bootstrap_log(db))
     except OSError as error:
-        finding = f"The bootstrap error log could not be inspected: {error}"
-    if finding:
-        findings.append(finding)
+        findings.append(f"The bootstrap error log could not be inspected: {error}")
     return findings
 
 
@@ -164,9 +197,14 @@ def main() -> int:
         set_state(db, "health_last_state", state)
         set_state(db, "health_last_severity", str(severity))
         db.commit()
-        escalating = state == "unhealthy" and (previous_state == "healthy" or severity > previous_severity)
     else:
-        escalating = True
+        # Without the database the stamp file is the only memory of the last
+        # notification, so a missing database still notifies once, not every run.
+        stamp = read_notification_stamp().split(":")
+        previous_state = stamp[0] if stamp and stamp[0] else "healthy"
+        previous_severity = int(stamp[1]) if len(stamp) > 1 and stamp[1].isdigit() else 0
+    escalating = state == "unhealthy" and (previous_state == "healthy" or severity > previous_severity)
+    write_notification_stamp(f"{state}:{severity}")
 
     append_log(log_directory / HEALTH_LOG_NAME, f"{utc_text()} {state} severity={severity} {detail}")
     if escalating:
