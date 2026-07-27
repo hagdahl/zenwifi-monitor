@@ -143,10 +143,16 @@ runs the monitor's own predicate rather than a second opinion about it, and
 `--discover-gateway` covers the Linux half of router setup. The installer
 places the tool on the target host.
 
-Not delivered: the interactive first-time setup on Linux is still a matter of
-editing the template by hand, where Windows has `Setup-LocalConfig.ps1` and
-`Setup-RouterConfig.ps1` with its TLS handshake check. And nothing here has
-run under a real systemd: no timer has fired on a Debian host, the install run
+Also delivered: `configure.py --init` writes a first configuration on either
+platform, carrying the same TLS posture as `Setup-RouterConfig.ps1` — it
+completes a handshake, reports the peer without validating the certificate
+because a home router's is self-signed, and refuses to write at all without
+one unless `--allow-insecure-http` is given and the confirmation sentence is
+typed. A new configuration is always `execution_mode: dry-run` with Notion off,
+it never overwrites an existing file, and it contains no template placeholder.
+
+Section 6 is delivered. What remains is not a gap in the artefacts but in the
+evidence: nothing here has run under a real systemd: no timer has fired on a Debian host, the install run
 substituted `systemctl`, and the desktop notification path has never met a
 real session bus. The first install is a soak, in dry-run.
 

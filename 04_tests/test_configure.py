@@ -137,5 +137,105 @@ record("the PowerShell entry point holds no migration logic of its own",
        "https_port" not in wrapper and "config_version" not in wrapper,
        "the wrapper still contains schema knowledge")
 
+# --- first-time setup ---------------------------------------------------------
+# --init writes a configuration for a host that has none. The properties that
+# matter are the ones a first install cannot recover from: a monitor that could
+# act immediately, or credentials sent over an unencrypted transport because
+# refusing was inconvenient. The TLS probe is substituted so the posture can be
+# exercised without a server; the refusal path is also checked for real against
+# a port with nothing on it.
+
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("configure", TOOL)
+configure = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(configure)
+
+
+def init_module(target, *, tls, extra=()):
+    """Call --init in-process so the TLS probe can be substituted."""
+    original_probe = configure.PROBE_TLS
+    original_argv = sys.argv
+    try:
+        configure.PROBE_TLS = (lambda host, port, timeout=10.0:
+                               {"protocol": "TLSv1.3", "cipher": "test", "subject": "CN=test"}
+                               if tls else None)
+        sys.argv = ["configure.py", "--config", str(target), "--init",
+                    "--router-host", "192.0.2.1", "--router-model", "test-model",
+                    "--state-database", str(target.parent / "state.sqlite3"),
+                    "--log-directory", str(target.parent / "logs"), *extra]
+        return configure.main()
+    finally:
+        configure.PROBE_TLS = original_probe
+        sys.argv = original_argv
+
+
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    target = Path(temp) / "config.local.json"
+
+    record("--init with TLS present succeeds as a dry run",
+           init_module(target, tls=True) == 0)
+    record("--init writes nothing without --apply", not target.exists())
+
+    record("--init with --apply succeeds and the result validates",
+           init_module(target, tls=True, extra=("--apply",)) == 0)
+    written = json.loads(target.read_text(encoding="utf-8"))
+    record("a new configuration is always dry-run",
+           written["execution_mode"] == "dry-run", written["execution_mode"])
+    record("a new configuration never enables Notion",
+           written["notion"]["enabled"] is False)
+    record("a new configuration records TLS", written["router"]["use_tls"] is True)
+    record("a new configuration carries no template placeholder",
+           "<" not in json.dumps(written), json.dumps(written)[:200])
+
+    record("--init refuses to overwrite an existing configuration",
+           init_module(target, tls=True, extra=("--apply",)) == 2)
+
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    target = Path(temp) / "config.local.json"
+    record("--init refuses to write when no TLS handshake succeeds",
+           init_module(target, tls=False, extra=("--apply",)) == 1)
+    record("nothing is written when TLS is refused", not target.exists())
+
+# The same refusal, without substituting anything: port 9 discards traffic and
+# never completes a TLS handshake.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    target = Path(temp) / "config.local.json"
+    real = run("--config", str(target), "--init", "--router-host", "127.0.0.1",
+               "--management-port", "9", "--router-model", "m",
+               "--state-database", str(Path(temp) / "s.sqlite3"),
+               "--log-directory", str(Path(temp) / "logs"), "--apply")
+    record("a real failed handshake refuses too", real.returncode == 1,
+           f"exit {real.returncode}: {real.stderr[:160]}")
+    record("the refusal explains what to fix",
+           "Enable or repair HTTPS" in real.stderr, real.stderr[:200])
+    record("the insecure exception is named but not taken",
+           "--allow-insecure-http" in real.stderr and not target.exists())
+
+# The insecure path must need more than a flag.
+record("the insecure exception requires a typed confirmation",
+       "INSECURE_CONFIRMATION" in TOOL.read_text(encoding="utf-8")
+       and "input(" in TOOL.read_text(encoding="utf-8"))
+
+# A prompt with nobody to answer it must refuse, not hang. This was found by
+# reverting the TLS refusal: the suite stopped responding instead of failing,
+# because the confirmation prompt blocked on a stdin no test was going to feed.
+# A provisioning run would have hung the same way, silently.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    target = Path(temp) / "config.local.json"
+    hung = subprocess.run(
+        [sys.executable, str(TOOL), "--config", str(target), "--init",
+         "--router-host", "127.0.0.1", "--management-port", "9", "--router-model", "m",
+         "--state-database", str(Path(temp) / "s.sqlite3"),
+         "--log-directory", str(Path(temp) / "logs"),
+         "--allow-insecure-http", "--apply"],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+    record("a prompt with no terminal refuses instead of blocking",
+           hung.returncode != 0, f"exit {hung.returncode}")
+    record("the refusal names what it needed and how to supply it",
+           "nobody to ask" in hung.stderr and "--help" in hung.stderr, hung.stderr[:200])
+    record("nothing is written when the confirmation cannot be given",
+           not target.exists())
+
 print(json.dumps({"suite": "configure", "results": results}, indent=2))
 print("configuration tool smoke test: OK")

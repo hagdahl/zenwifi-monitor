@@ -19,6 +19,8 @@ on a router is a decision for a person, not for a migration.
 import argparse
 import json
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 from datetime import datetime
@@ -34,6 +36,7 @@ sys.path.insert(0, str(ROOT / "src"))
 # next run, which is a worse outcome than an absent optional key.
 FILLABLE_SECTIONS = ("monitor", "outbox", "health")
 NOTION_API_VERSION_FALLBACK = "2026-03-11"
+INSECURE_CONFIRMATION = "I ACCEPT INSECURE HTTP"
 
 
 def load_json(path: Path) -> dict:
@@ -143,12 +146,171 @@ def discover_gateway() -> int:
     return 2
 
 
+def ask(prompt: str) -> str:
+    """Prompt a person, or refuse when there is nobody there to answer.
+
+    Blocking on stdin in a non-interactive context is not a stall, it is a
+    hang: a script, a CI step or a provisioning run waits for ever with no
+    output explaining why. Refusing loudly and naming the flag that would have
+    supplied the value is always better than waiting.
+    """
+    def refuse():
+        raise SystemExit(
+            f"This step needs an answer to: {prompt}\n"
+            "There is nobody to ask: standard input is not interactive. "
+            "Supply the value on the command line instead; see --help.")
+
+    # Two checks, because neither is sufficient on its own. isatty() is a hint
+    # and it lies in both directions: a Windows shell can report a terminal
+    # where no input will ever arrive, which is how this was found. The EOF is
+    # the fact, so it is caught as well.
+    if not sys.stdin or not sys.stdin.isatty():
+        refuse()
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        refuse()
+
+
+def probe_tls(host: str, port: int, timeout: float = 10.0) -> dict | None:
+    """Complete a TLS handshake and describe the peer, or return None.
+
+    The certificate is deliberately NOT validated: a home router almost always
+    presents a self-signed certificate, and refusing it would push every
+    operator towards plain HTTP, which is the outcome this check exists to
+    prevent. What the handshake proves is that the transport is encrypted; what
+    the reported subject lets the operator do is decide whether to trust it.
+    This mirrors scripts/Setup-RouterConfig.ps1 on Windows.
+    """
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as secure:
+                certificate = secure.getpeercert(binary_form=False) or {}
+                return {"protocol": secure.version(),
+                        "cipher": (secure.cipher() or ("", "", 0))[0],
+                        "subject": str(certificate.get("subject", "not presented"))}
+    except (OSError, ssl.SSLError, ValueError):
+        return None
+
+
+def initialise(args) -> int:
+    """Write a first configuration. Dry run unless --apply, dry-run mode always."""
+    target = args.config or (ROOT / "config.local.json")
+    if target.exists():
+        print(f"{target} already exists. Use --migrate to bring it up to date; "
+              f"--init never overwrites a configuration.", file=sys.stderr)
+        return 2
+
+    example = load_json(ROOT / "config.example.json")
+    host = args.router_host or ask("Router IP address or hostname: ")
+    if not host:
+        print("A router host is required.", file=sys.stderr)
+        return 2
+    port = args.management_port
+    state = args.state_database or ask("Absolute path for the SQLite database: ")
+    logs = args.log_directory or ask("Absolute local log directory: ")
+    # The model is not decoration: validate_config requires it, so a
+    # configuration written without one would be refused by the monitor at its
+    # first run. Better to ask now than to hand over a file that cannot work.
+    model = args.router_model or ask("Router model: ")
+    if not state or not logs:
+        print("Both a database path and a log directory are required.", file=sys.stderr)
+        return 2
+    if not model:
+        print("A router model is required; the monitor's own validator rejects a "
+              "configuration without one.", file=sys.stderr)
+        return 2
+
+    result = PROBE_TLS(host, port)
+    print(f"TLS available at {host}:{port} (certificate not validated): {bool(result)}")
+    if result:
+        print(f"  negotiated protocol: {result['protocol']}")
+        print(f"  cipher: {result['cipher']}")
+        print(f"  certificate subject: {result['subject']}")
+
+    use_tls = True
+    if not result:
+        print(f"WARNING: no TLS handshake at {host}:{port}. Do not fall back to plain "
+              f"HTTP as a convenience. Enable or repair HTTPS in the router's "
+              f"administration interface and run this again.", file=sys.stderr)
+        if not args.allow_insecure_http:
+            print("Refusing to write a router configuration without verified TLS. "
+                  "Use --allow-insecure-http only after accepting the risk.", file=sys.stderr)
+            return 1
+        # An explicit flag is not enough. Typing the sentence is the point: it
+        # makes an unencrypted credential path a deliberate act rather than a
+        # flag somebody copied out of a forum post.
+        typed = ask(f"Type {INSECURE_CONFIRMATION} to allow unencrypted router traffic: ")
+        if typed != INSECURE_CONFIRMATION:
+            print("Not confirmed exactly. Nothing was written.", file=sys.stderr)
+            return 1
+        print("WARNING: insecure HTTP authorised. Credentials and router traffic will "
+              "have no transport protection.", file=sys.stderr)
+        use_tls = False
+
+    config = {
+        "config_version": project_version(),
+        "paths": {"log_directory": logs, "state_database": state},
+        "router": {"host": host, "management_port": port, "use_tls": use_tls,
+                   "model": model},
+        "monitor": dict(example["monitor"]),
+        # Empty rather than the template's "<Notion data source ID>". A written
+        # configuration should contain no placeholder text at all: a value in
+        # angle brackets reads like a real setting to anyone skimming, and an
+        # empty string fails loudly the moment somebody enables Notion without
+        # filling it in.
+        "notion": {"enabled": False,
+                   "data_source_id": "",
+                   "api_version": example.get("notion", {}).get(
+                       "api_version", NOTION_API_VERSION_FALLBACK)},
+        # Never anything else. A first configuration that could restart a router
+        # the moment a timer fires would make the soak period optional, and the
+        # soak is how an operator learns what the monitor would have done.
+        "execution_mode": "dry-run",
+        "outbox": dict(example["outbox"]),
+        "health": dict(example["health"]),
+    }
+
+    print(f"Execution mode: {config['execution_mode']} (always, for a new configuration)")
+    print(f"Notion logging: {config['notion']['enabled']}")
+    print(f"Router transport: {'TLS' if use_tls else 'PLAIN HTTP, authorised explicitly'}")
+
+    if not args.apply:
+        print(f"Dry run. {target} was not created. Re-run with --apply to write it.")
+        return 0
+
+    target.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    print(f"Wrote {target}.")
+    print("Store credentials next, then soak in dry-run before enabling execution.")
+    return validate(target)
+
+
+# Substituted by the suite so the TLS posture can be exercised without a
+# server. Production code always calls the real probe.
+PROBE_TLS = probe_tls
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", type=Path,
                         help="Path to the local configuration. Defaults to config.local.json "
                              "beside the project, or /etc/zenwifi-monitor/config.json when that "
                              "exists and the project-local file does not.")
+    parser.add_argument("--init", action="store_true", dest="init",
+                        help="Create a first configuration. Never overwrites one, and always "
+                             "writes execution_mode dry-run.")
+    parser.add_argument("--router-host", help="Skip the prompt for the router address.")
+    parser.add_argument("--router-model", default="",
+                        help="Router model. Required; prompted for when omitted.")
+    parser.add_argument("--management-port", type=int, default=8443,
+                        help="Router management port. Default 8443.")
+    parser.add_argument("--state-database", help="Skip the prompt for the database path.")
+    parser.add_argument("--log-directory", help="Skip the prompt for the log directory.")
+    parser.add_argument("--allow-insecure-http", action="store_true",
+                        help="Last resort. Requires typing a confirmation sentence.")
     parser.add_argument("--migrate", action="store_true",
                         help="Bring an earlier configuration up to the current schema.")
     parser.add_argument("--validate", action="store_true",
@@ -163,8 +325,10 @@ def main() -> int:
 
     if args.discover:
         return discover_gateway()
+    if args.init:
+        return initialise(args)
     if not args.migrate and not args.validate:
-        parser.error("Choose --migrate, --validate or --discover-gateway.")
+        parser.error("Choose --init, --migrate, --validate or --discover-gateway.")
 
     config_path = args.config
     if config_path is None:

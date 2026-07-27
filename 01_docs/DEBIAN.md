@@ -46,7 +46,23 @@ configuration template at `/etc/zenwifi-monitor/config.json` owned by root and
 readable by the service group only. It then enables both timers.
 
 Edit `/etc/zenwifi-monitor/config.json` before going further. The paths in it
-must point at the state and log directories the installer created.
+must point at the state and log directories the installer created. To write one
+from scratch instead of editing the template:
+
+```
+python3 /opt/zenwifi-monitor/scripts/configure.py --config /etc/zenwifi-monitor/config.json \
+    --init --router-host 10.0.0.1 --router-model 'ZenWiFi XT8' \
+    --state-database /var/lib/zenwifi-monitor/watchdog.sqlite3 \
+    --log-directory /var/log/zenwifi-monitor
+```
+
+Without `--apply` it only reports. It completes a TLS handshake against the
+router first and refuses to write without one; the certificate is not
+validated, because a home router's is self-signed and rejecting that would push
+you towards plain HTTP, which is what the check exists to prevent. The peer's
+subject is printed so you can decide whether to trust it. A configuration
+written this way is always `execution_mode: dry-run` with Notion off, and
+`--init` never overwrites an existing file.
 
 Two helpers, both standard-library only so they work before the environment
 exists, and both dry runs unless told otherwise:
