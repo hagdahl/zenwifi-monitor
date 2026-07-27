@@ -12,7 +12,6 @@ healthy runs resume.
 import argparse
 import json
 import sqlite3
-import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _defaults import (MAX_ATTEMPTS_PER_EVENT, NOTICE_COOLDOWN_MINUTES,  # noqa: E402
                        OUTBOX_AGE_MINUTES, RUN_AGE_MINUTES)
 from _logrotate import append_log, bootstrap_log_path  # noqa: E402
+from _platform import LEVEL_WARNING, show_notice, spawn_detached, windowless_interpreter  # noqa: E402
 
 HEALTH_LOG_NAME = "health.log"
 
@@ -180,16 +180,19 @@ def evaluate(db, cfg: dict) -> list[tuple[str, str]]:
 
 
 def visible_health_notice(detail: str) -> None:
-    import ctypes
-    ctypes.windll.user32.MessageBoxW(0, detail[:900], "Router Watchdog health", 0x30)
+    show_notice("Router Watchdog health", detail, LEVEL_WARNING)
 
 
 def launch_health_notice(detail: str) -> None:
-    """Start the notice windowless so the health job itself stays silent."""
-    windowless = Path(sys.executable).with_name("pythonw.exe")
-    interpreter = str(windowless) if windowless.is_file() else sys.executable
-    subprocess.Popen([interpreter, __file__, "--notice", "--detail", detail], close_fds=True,
-                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    """Start the notice detached and windowless so the health job stays silent.
+
+    The notice runs in a child rather than inline because a message box is
+    modal: shown from the health run itself it would hold the process open
+    until dismissed, and a scheduled job with no visible desktop would then
+    never exit. That is the failure mode this monitor exists to report, so it
+    must not reproduce it.
+    """
+    spawn_detached([windowless_interpreter(), __file__, "--notice", "--detail", detail])
 
 
 def main() -> int:

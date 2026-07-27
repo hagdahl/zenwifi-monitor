@@ -8,9 +8,24 @@ Strengthen reliable local operation, deliver queued Notion events after
 connectivity returns, add local health monitoring, and support both Windows 11
 and Debian Linux without weakening the existing restart safety model.
 
-## 1. Cross-platform operating model
+## 1. Cross-platform operating model - partially delivered
 
 Refactor the monitor into a platform-neutral core and small platform adapters.
+
+Delivered: the code seam. `src/_platform.py` holds the two behaviours that
+differ per platform, showing a notice and starting a detached child, and is
+standard-library-only so the health monitor keeps its independence from the
+watchdog's third-party dependencies. `src/_secrets.py` holds the credential
+rule, naming the one acceptable backend per platform and refusing every
+fallback, and is imported lazily so the core stays importable where the
+dependency is absent. `04_tests/test_platform.py` pins that no other module
+reaches around the seam to a platform primitive, that a notice never raises,
+and that a fallback backend is refused.
+
+Not delivered: the scheduler and credential *deployment* halves of the table
+below. A systemd service, timer and encrypted credentials are part of section
+6, and the POSIX notice path has been exercised only against a substituted
+failing surface, never against a real desktop session.
 
 | Concern | Windows 11 | Debian Linux |
 |---|---|---|
@@ -100,10 +115,12 @@ Replace unbounded bootstrap logging with bounded rotation.
 4. Pin GitHub Actions to immutable commit hashes and document their upstream
    release names. Delivered.
 5. Extend CI to Windows and Ubuntu/Debian-compatible execution. Delivered as
-   two jobs. The Linux job runs the platform-neutral suites only, because
-   `src/watchdog.py` still imports the Windows Credential Manager backend at
-   module scope; `test_watchdog.py` and `test_outbox.py` are excluded there
-   deliberately and the exclusion ends when section 1 lands.
+   two jobs running the same suites. An earlier revision excluded two suites
+   from the Linux job on the stated ground that `src/watchdog.py` imported the
+   Windows Credential Manager backend at module scope. That was asserted
+   without being tested and was wrong: the module imported and both suites
+   passed on Linux unchanged. The exclusion removed real coverage for no
+   reason and has been withdrawn.
 6. Add a scheduled dependency-review workflow; upgrades remain deliberate pull
    requests with regenerated hashes and tests. Not started.
 
@@ -260,7 +277,7 @@ failure into an otherwise healthy system.
    and allowing overlapping runs, and hash-locked dependencies, which is
    step 3.
 3. Platform interfaces and dependency locking. Dependency locking is
-   delivered; the platform interfaces in section 1 remain, and they are what
-   unblocks the two suites the Linux CI job currently cannot run.
+   delivered. The platform seam in section 1 is delivered; what remains of
+   section 1 is the deployment half, which belongs with step 4.
 4. Debian service, timer, credential, notification, and documentation path.
 5. Cross-platform CI and independent pre-publication review.

@@ -5,7 +5,6 @@ import asyncio
 import json
 import re
 import sqlite3
-import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -15,11 +14,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _defaults import MAX_ATTEMPTS_PER_EVENT, MAX_DELIVERIES_PER_RUN, RETENTION_DAYS  # noqa: E402
 from _logrotate import append_log, bootstrap_log_path  # noqa: E402
+from _platform import LEVEL_INFO, LEVEL_WARNING, show_notice, spawn_detached, windowless_interpreter  # noqa: E402
+from _secrets import SERVICE, get_secret, require_persistent_secret_store  # noqa: E402
 
-import keyring
-from keyring.backends.Windows import WinVaultKeyring
-
-SERVICE = "ZenWiFiMonitor"
+__all__ = ["SERVICE", "require_persistent_secret_store"]
 
 def utc_now() -> datetime: return datetime.now(UTC)
 def utc_text(value: datetime | None = None) -> str: return (value or utc_now()).isoformat()
@@ -37,11 +35,6 @@ def sanitize_error(error: Exception) -> str:
     """Describe a failure without ever persisting an authorization header."""
     text = f"{type(error).__name__}: {error}"
     return re.sub(r"(?i)bearer\s+\S+", "Bearer <redacted>", text)[:400]
-
-def require_persistent_secret_store() -> None:
-    """Fail closed if Python selected a backend other than Windows Credential Manager."""
-    if not isinstance(keyring.get_keyring(), WinVaultKeyring):
-        raise RuntimeError("Windows Credential Manager is required; fallback to files or environment variables is not allowed.")
 
 def load_config(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
@@ -133,9 +126,9 @@ def internet_available(urls: list[str]) -> bool:
 async def reboot_router(cfg: dict) -> bool:
     from asusrouter import AsusRouter
     from asusrouter.modules.system import AsusSystem
-    username = keyring.get_password(SERVICE, "router_username")
-    password = keyring.get_password(SERVICE, "router_password")
-    if not username or not password: raise RuntimeError("Router credentials are missing from Windows Credential Manager.")
+    username = get_secret("router_username")
+    password = get_secret("router_password")
+    if not username or not password: raise RuntimeError("Router credentials are missing from the operating system's protected credential store.")
     port = cfg["router"].get("management_port", cfg["router"].get("https_port", 8443))
     use_tls = cfg["router"].get("use_tls", True)
     router = AsusRouter(hostname=cfg["router"]["host"], username=username, password=password, port=port, use_ssl=use_tls)
@@ -147,7 +140,7 @@ async def reboot_router(cfg: dict) -> bool:
         await router.async_del_connection()
 
 def notion_event(cfg: dict, status: str, action: str, detail: str) -> None:
-    token = keyring.get_password(SERVICE, "notion_token")
+    token = get_secret("notion_token")
     data_source_id = cfg["notion"]["data_source_id"]
     if not token or data_source_id.startswith("<"): raise RuntimeError("Notion token or data source ID is missing.")
     body = {"parent": {"data_source_id": data_source_id}, "properties": {
@@ -257,22 +250,24 @@ def delivery_is_configured(cfg: dict) -> bool:
     return notion_is_enabled(cfg) and cfg.get("execution_mode") == "execute"
 
 def visible_reboot_notice():
-    import ctypes
-    ctypes.windll.user32.MessageBoxW(0, "Internet has been unavailable for at least 15 minutes. The router is now restarting.", "Router Watchdog", 0x30)
+    show_notice("Router Watchdog",
+                "Internet has been unavailable for at least 15 minutes. The router is now restarting.",
+                LEVEL_WARNING)
 
 def visible_recovery_notice():
-    import ctypes
-    ctypes.windll.user32.MessageBoxW(0, "Internet connectivity has been restored after the router restart.", "Router Watchdog", 0x40)
-
-def _notice_interpreter() -> str:
-    """Prefer the windowless interpreter so a notice never flashes a console."""
-    windowless = Path(sys.executable).with_name("pythonw.exe")
-    return str(windowless) if windowless.is_file() else sys.executable
+    show_notice("Router Watchdog",
+                "Internet connectivity has been restored after the router restart.",
+                LEVEL_INFO)
 
 def _spawn_notice(flag: str) -> None:
-    """Start a notice in its own process without creating a console window."""
-    subprocess.Popen([_notice_interpreter(), __file__, flag], close_fds=True,
-                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    """Start a notice in its own process, detached and without a window.
+
+    The notice runs in a child rather than inline because a message box is
+    modal: shown from the monitoring run itself it would hold the process open
+    until somebody dismissed it, and on a scheduled job with no visible desktop
+    that is indefinitely. A failure to spawn is deliberately not fatal.
+    """
+    spawn_detached([windowless_interpreter(), __file__, flag])
 
 def launch_reboot_notice() -> None:
     _spawn_notice("--notice")

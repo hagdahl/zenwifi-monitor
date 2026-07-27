@@ -25,7 +25,7 @@ The table below was verified against an actual filesystem inventory, not carried
 | `00_admin/` | Decisions, glossary, handover | `00_admin/` | Editable | Logic |
 | `01_docs/` | Architecture, authentication, user guide, publication, review prompt, improvement plan | `01_docs/` | Editable | Logic |
 | `04_tests/` | Smoke and regression suites | `04_tests/` | Editable | Logic |
-| `src/` | `watchdog.py`, `health.py`, `_logrotate.py` | `03_src/modules` and `03_src/scripts` | Editable | Logic |
+| `src/` | `watchdog.py`, `health.py`, `_platform.py`, `_secrets.py`, `_defaults.py`, `_logrotate.py` | `03_src/modules` and `03_src/scripts` | Editable | Logic |
 | `scripts/` | PowerShell setup, migration, staging and the VBS launcher | `03_src/scripts` | Editable | Logic |
 | `.github/` | Continuous integration workflow | Not in the tree | Editable | Logic |
 | project root | README, licence, disclaimer, security, changelog, configuration template, `VERSION` | Same | Editable | Logic |
