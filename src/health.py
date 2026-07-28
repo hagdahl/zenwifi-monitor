@@ -386,6 +386,13 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as error:
-        append_log(bootstrap_log_path(), f"{utc_text()} health {type(error).__name__}: {error}")
+        # Recording the failure must not replace it: an unwritable log directory
+        # would otherwise raise from inside this handler, hiding the original
+        # error and skipping the non-zero exit that tells the timer something
+        # went wrong.
+        try:
+            append_log(bootstrap_log_path(), f"{utc_text()} health {type(error).__name__}: {error}")
+        except OSError:
+            pass
         print(f"ERROR: {error}", file=sys.stderr)
         raise SystemExit(2)

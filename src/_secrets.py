@@ -61,30 +61,59 @@ def accepted_backend() -> tuple[str, str]:
 
 
 def credentials_directory() -> Path | None:
-    """The systemd credentials directory for this run, if there is one."""
+    """The systemd credentials directory for this run, if there is a real one.
+
+    Being a directory is not evidence. systemd decrypts credentials onto a
+    private tmpfs owned by the run's own user with mode 0700, and that is the
+    whole basis for treating this store as equivalent to a desktop keyring. A
+    plain directory of plaintext files satisfies none of it, and accepting one
+    would put credentials in exactly the place the module docstring says they
+    may never be — while passing this project's own fail-closed gate, because
+    the gate asks this function.
+
+    Ownership and mode are checked on POSIX, where systemd exists and where
+    those bits mean what they say. Elsewhere nothing sets the variable, so the
+    branch is unreachable in practice and the check is skipped rather than
+    approximated against a permission model it does not fit.
+    """
     value = os.environ.get(CREDENTIALS_DIRECTORY)
     if not value:
         return None
     path = Path(value)
-    return path if path.is_dir() else None
+    if not path.is_dir():
+        return None
+    if os.name != "posix":
+        return path
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    if info.st_uid != os.getuid():
+        return None
+    # Any group or other bit at all: not the directory systemd creates.
+    if info.st_mode & 0o077:
+        return None
+    return path
 
 
 def require_persistent_secret_store() -> None:
     """Fail closed unless this run has an acceptable protected store.
 
-    A unit that declares credentials but whose directory is missing is a
-    misconfiguration, not a reason to quietly fall back to a desktop keyring
-    that a service cannot reach anyway; the environment variable is only set
-    when systemd created the directory, so its presence and absence are both
-    meaningful.
+    A unit that declares credentials but whose directory is missing, or is not
+    the private per-run directory systemd creates, is a misconfiguration rather
+    than a reason to quietly fall back to a desktop keyring a service cannot
+    reach anyway; the environment variable is only set when systemd created the
+    directory, so its presence and absence are both meaningful.
     """
     if credentials_directory() is not None:
         return
     if os.environ.get(CREDENTIALS_DIRECTORY):
         raise RuntimeError(
-            "systemd declared a credentials directory that does not exist. "
-            "Check LoadCredentialEncrypted in the unit; falling back to another "
-            "store is not allowed.")
+            "CREDENTIALS_DIRECTORY is set but does not name a directory owned by "
+            "this user with no group or other access. Either the unit's "
+            "LoadCredentialEncrypted is wrong or the variable was set by "
+            "something that is not systemd; falling back to another store is "
+            "not allowed.")
     import keyring
 
     module_name, class_name = accepted_backend()

@@ -354,17 +354,30 @@ be closed:
   memories now carry a write time and the newer one wins, which is what stops a
   database that accepts reads but refuses writes from handing every run the same
   stale view and escalating for ever.
-- **F11 (high).** On Debian the bootstrap error log resolves under a home
-  directory the service cannot reach, which loses every pre-database failure and
-  makes one health check dead code.
+- **F11 - closed.** The bootstrap error log follows `$LOGS_DIRECTORY` before
+  `%LOCALAPPDATA%` and the home directory, so on Debian it lands in the one
+  place `ProtectHome=yes` and a home-less service account leave writable. The
+  second half mattered more than the path: the log is written from inside both
+  top-level exception handlers, so a failure to write raised over the error
+  being recorded and skipped the non-zero exit. Both handlers now tolerate that,
+  and `install.sh --install` refuses when the service account cannot write the
+  directory.
 - **F12 - closed.** The restart failure is recorded through the sanitizer, and
   the sanitizer now redacts the credential values this run holds as well as the
   authorization header. A router password has no recognisable shape, so pattern
   matching alone could never have found it.
-- **F13 (high).** The Debian installer leaves installed code owned by the
-  invoking user.
-- **F14 (high).** The systemd credential directory is accepted on the sole test
-  that it is a directory.
+- **F13 - closed.** Files are placed one at a time with
+  `install -m 0644 -o root -g root` instead of `cp -a` on the source tree, and
+  `${PREFIX}/src` is removed first so a module deleted upstream cannot survive
+  an upgrade. The pin is behavioural: the suite runs the installer verbatim at
+  its real paths inside a throwaway mount namespace and observes the resulting
+  owners and modes, because ownership is a property of an install and reading
+  the script is how this survived four reviews.
+- **F14 - closed.** The directory is trusted only when it is owned by the run's
+  own user with no group or other access, which is what `systemd` actually
+  creates. Ownership and mode are checked rather than the path, because
+  `/run/credentials/` is an implementation detail and the permissions are the
+  property being relied on.
 - **F15 (high).** Several safety pins assert their own fixture. Removing the code
   that stamps an outage, the code that clears it, or the dry-run cooldown stamp
   leaves every suite green, and the cooldown test cannot distinguish the cooldown

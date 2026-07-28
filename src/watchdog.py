@@ -30,8 +30,19 @@ def write_bootstrap_error(error: Exception) -> None:
 
     The log is size-bounded and rotated before writing, so a persistent failure
     cannot grow it without limit and the active record is never truncated.
+
+    A failure to write is swallowed on purpose. This runs inside the top-level
+    exception handler, so an OSError raised here would propagate in place of the
+    error being recorded: the operator would see a permission problem on a log
+    directory instead of the fault that actually stopped the run, and the
+    non-zero exit that the handler is there to produce would never be reached.
+    Losing the record is bad; losing the original diagnosis and the exit code is
+    worse.
     """
-    append_log(bootstrap_log_path(), f"{utc_text()} {type(error).__name__}: {error}")
+    try:
+        append_log(bootstrap_log_path(), f"{utc_text()} {type(error).__name__}: {error}")
+    except OSError:
+        pass
 
 
 def sanitize_error(error: Exception) -> str:

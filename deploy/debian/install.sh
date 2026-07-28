@@ -96,15 +96,37 @@ PYVERSION
   install -d -m 0750 -o "${SERVICE_USER}" -g "${SERVICE_USER}" /var/lib/zenwifi-monitor
   install -d -m 0750 -o "${SERVICE_USER}" -g "${SERVICE_USER}" /var/log/zenwifi-monitor
 
-  cp -a "${SOURCE_DIR}/src" "${PREFIX}/"
+  # A monitor that cannot record a pre-database failure is the failure mode this
+  # project keeps meeting, so refuse the install rather than discover it later.
+  # The service account has no home and the units set ProtectHome=yes, so this
+  # directory is the only place a crash before the database can be written down.
+  if ! runuser -u "${SERVICE_USER}" -- test -w /var/log/zenwifi-monitor; then
+    echo "The service account cannot write /var/log/zenwifi-monitor. Refusing to install." >&2
+    exit 1
+  fi
+
+  # NOT cp -a. That preserves the ownership of the clone, and the documented
+  # invocation is sudo from a user-owned checkout, so the installed code would
+  # end up writable by an ordinary account while systemd runs it as the service
+  # user with the router credentials decrypted into the process. Every hardening
+  # directive in the unit would still be satisfied, because none of them says
+  # anything about who may rewrite the code before it starts.
+  #
+  # rm -rf first: install(1) overwrites the files it is given, so a module left
+  # behind by an older version would survive an upgrade and keep being importable.
+  rm -rf "${PREFIX}/src"
+  install -d -m 0755 -o root -g root "${PREFIX}/src"
+  find "${SOURCE_DIR}/src" -maxdepth 1 -type f -name '*.py' \
+    -exec install -m 0644 -o root -g root {} "${PREFIX}/src/" \;
   # configure.py is standard-library only, so it works before the environment
   # exists; it is installed alongside so an operator can validate and migrate
   # the configuration on the target host rather than only at build time.
-  install -d -m 0755 "${PREFIX}/scripts"
-  install -m 0755 "${SOURCE_DIR}/scripts/configure.py" "${PREFIX}/scripts/configure.py"
-  install -m 0644 "${SOURCE_DIR}/VERSION" "${PREFIX}/VERSION"
-  install -m 0644 "${SOURCE_DIR}/config.example.json" "${PREFIX}/config.example.json"
-  cp -a "${SOURCE_DIR}/requirements.in" "${SOURCE_DIR}/requirements.lock.txt" "${PREFIX}/"
+  install -d -m 0755 -o root -g root "${PREFIX}/scripts"
+  install -m 0755 -o root -g root "${SOURCE_DIR}/scripts/configure.py" "${PREFIX}/scripts/configure.py"
+  install -m 0644 -o root -g root "${SOURCE_DIR}/VERSION" "${PREFIX}/VERSION"
+  install -m 0644 -o root -g root "${SOURCE_DIR}/config.example.json" "${PREFIX}/config.example.json"
+  install -m 0644 -o root -g root "${SOURCE_DIR}/requirements.in" "${PREFIX}/requirements.in"
+  install -m 0644 -o root -g root "${SOURCE_DIR}/requirements.lock.txt" "${PREFIX}/requirements.lock.txt"
 
   python3 -m venv "${PREFIX}/venv"
   # --require-hashes: pip refuses the whole set unless every artefact matches a

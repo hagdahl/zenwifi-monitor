@@ -14,8 +14,27 @@ BOOTSTRAP_LOG_NAME = "bootstrap-errors.log"
 
 
 def bootstrap_log_path() -> Path:
-    """Windows uses %LOCALAPPDATA%; Debian and other POSIX hosts use the home directory."""
-    return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / BOOTSTRAP_DIRECTORY_NAME / BOOTSTRAP_LOG_NAME
+    """Where a failure can be recorded before the configured store is available.
+
+    Order matters, and the first entry is the one that was missing. systemd sets
+    LOGS_DIRECTORY from `LogsDirectory=`, and on the Debian units that is the
+    only place the service may write: the account is created with no home and
+    both units set `ProtectHome=yes`, so the previous fallback to the home
+    directory resolved somewhere unwritable. That was not merely inconvenient.
+    `append_log` is called from inside the top-level exception handlers, so it
+    raised over the original error and the crash record was lost entirely, and
+    the health monitor's bootstrap-log check short-circuited on a file that
+    could never exist — leaving no way at all to see a watchdog that crashed
+    after writing its run row.
+    """
+    logs_directory = os.environ.get("LOGS_DIRECTORY")
+    if logs_directory:
+        # systemd may pass a colon-separated list; the first entry is ours.
+        return Path(logs_directory.split(os.pathsep)[0]) / BOOTSTRAP_LOG_NAME
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / BOOTSTRAP_DIRECTORY_NAME / BOOTSTRAP_LOG_NAME
+    return Path.home() / BOOTSTRAP_DIRECTORY_NAME / BOOTSTRAP_LOG_NAME
 
 
 def rotate_log(path: Path, max_bytes: int = MAX_LOG_BYTES, retained: int = RETAINED_LOG_FILES) -> bool:

@@ -142,8 +142,19 @@ sudo -u zenwifi sqlite3 /var/lib/zenwifi-monitor/watchdog.sqlite3 \
 ```
 
 If a run failed before it could open the database, look in the bootstrap error
-log under `/var/log/zenwifi-monitor`, which is written directly and is
-size-bounded.
+log, which is written directly and is size-bounded:
+
+```
+sudo tail /var/log/zenwifi-monitor/bootstrap-errors.log
+```
+
+That path is not a preference. The service account has no home directory and
+both units set `ProtectHome=yes`, so `LogsDirectory=` is the only place either
+process may write before its configured store exists; the code reads
+`$LOGS_DIRECTORY`, which systemd sets from that directive. `install.sh
+--install` refuses outright if the account cannot write there, because a
+monitor that cannot record a failure it hit before opening the database leaves
+nothing at all to read afterwards.
 
 ## What differs from the Windows install
 

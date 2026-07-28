@@ -13,7 +13,9 @@ that is a teardown artefact and never affects an assertion.
 import gc
 import importlib.util
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from datetime import timedelta
@@ -456,6 +458,27 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     record("and it is reported as a fault rather than passed over",
            exits == [1, 1, 1, 1, 1], str(exits))
     gc.collect()
+
+# The health monitor's own top-level handler, exercised as a process because
+# that is the only place it runs. An unwritable bootstrap log must not raise
+# from inside the handler: doing so replaces the error that actually stopped
+# the run and skips the non-zero exit the timer reads. LOGS_DIRECTORY is
+# pointed at a path underneath a regular file, which cannot be created as a
+# directory on any platform this project supports.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    blocker = Path(temp) / "not-a-directory"
+    blocker.write_text("", encoding="utf-8")
+    environment = dict(os.environ)
+    environment["LOGS_DIRECTORY"] = str(blocker / "logs")
+    environment.pop("LOCALAPPDATA", None)
+    completed = subprocess.run([sys.executable, str(SRC / "health.py")],
+                               capture_output=True, text=True, timeout=120,
+                               env=environment)
+    record("a health run that fails before its config exits non-zero",
+           completed.returncode == 2, f"exit {completed.returncode}: {completed.stderr[-300:]}")
+    record("and it reports the error that stopped it, not the log directory",
+           "--config is required" in completed.stderr,
+           completed.stderr[-300:])
 
 print(json.dumps({"suite": "health", "checks": len(results), "failures": 0,
                   "result": "green", "findings": results}, indent=2))

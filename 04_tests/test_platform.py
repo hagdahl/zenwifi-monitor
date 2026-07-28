@@ -227,8 +227,51 @@ try:
     try:
         secrets_module.require_persistent_secret_store()
     except RuntimeError as error:
-        refused = "does not exist" in str(error)
+        refused = "CREDENTIALS_DIRECTORY is set but does not name" in str(error)
     record("a declared but missing credentials directory is refused", refused)
+
+    # Being a directory is not evidence. systemd decrypts credentials onto a
+    # private tmpfs owned by the run's own user with mode 0700, and that is the
+    # entire reason this store is treated as equivalent to a desktop keyring. A
+    # plain directory of plaintext files must not be accepted, or a credential
+    # ends up on disk unprotected while the project's own fail-closed gate says
+    # everything is in order.
+    if os.name == "posix":
+        with tempfile.TemporaryDirectory() as temp:
+            credentials = Path(temp)
+            os.environ[secrets_module.CREDENTIALS_DIRECTORY] = str(credentials)
+            os.chmod(credentials, 0o700)
+            record("a private credentials directory is accepted",
+                   secrets_module.credentials_directory() == credentials)
+
+            for mode in (0o750, 0o705, 0o777):
+                os.chmod(credentials, mode)
+                record(f"a credentials directory with mode {mode:o} is refused",
+                       secrets_module.credentials_directory() is None)
+                refused_store = False
+                try:
+                    secrets_module.require_persistent_secret_store()
+                except RuntimeError:
+                    refused_store = True
+                record(f"mode {mode:o} makes the whole store unacceptable rather than a fallback",
+                       refused_store)
+
+            os.chmod(credentials, 0o700)
+            # Ownership is the other half, and it cannot be tested by creating a
+            # directory as somebody else without root. Substituting the identity
+            # the check compares against exercises the same branch and restores
+            # it immediately, because os is shared with the rest of the process.
+            original_getuid = os.getuid
+            try:
+                os.getuid = lambda: original_getuid() + 1
+                record("a credentials directory owned by another user is refused",
+                       secrets_module.credentials_directory() is None)
+            finally:
+                os.getuid = original_getuid
+            record("restoring the identity restores acceptance",
+                   secrets_module.credentials_directory() == credentials)
+    else:
+        record("credential directory ownership checks skipped: not a POSIX host", True, "skipped")
 finally:
     if original_environ is None:
         os.environ.pop(secrets_module.CREDENTIALS_DIRECTORY, None)

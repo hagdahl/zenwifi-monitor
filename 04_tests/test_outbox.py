@@ -11,6 +11,7 @@ teardown artefact and never affects an assertion.
 import gc
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 from datetime import timedelta
@@ -164,6 +165,63 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
         _logrotate.rotate_log = original_rotate
     record("a failed rotation does not lose the line",
            "written despite a failed rotation" in log.read_text(encoding="utf-8"))
+
+# Where the bootstrap log goes decides whether a crash before the database is
+# recorded at all. On the Debian units the service account has no home and
+# ProtectHome=yes is set, so the home directory is unwritable and systemd's
+# LOGS_DIRECTORY is the only place that works. These cases substitute the
+# environment rather than a function, because the environment is the input.
+original_logs_directory = os.environ.get("LOGS_DIRECTORY")
+original_localappdata = os.environ.get("LOCALAPPDATA")
+try:
+    os.environ["LOGS_DIRECTORY"] = os.pathsep.join(["/var/log/zenwifi-monitor", "/var/log/other"])
+    os.environ["LOCALAPPDATA"] = str(Path("C:/Users/nobody/AppData/Local"))
+    chosen = _logrotate.bootstrap_log_path()
+    record("systemd's logs directory wins over every other candidate",
+           chosen == Path("/var/log/zenwifi-monitor") / _logrotate.BOOTSTRAP_LOG_NAME, str(chosen))
+    record("only the first entry of a colon-separated logs directory is used",
+           "other" not in str(chosen), str(chosen))
+
+    os.environ.pop("LOGS_DIRECTORY")
+    chosen = _logrotate.bootstrap_log_path()
+    record("without systemd the Windows application data directory is used",
+           chosen == Path("C:/Users/nobody/AppData/Local") / _logrotate.BOOTSTRAP_DIRECTORY_NAME
+           / _logrotate.BOOTSTRAP_LOG_NAME, str(chosen))
+
+    os.environ.pop("LOCALAPPDATA")
+    chosen = _logrotate.bootstrap_log_path()
+    record("with neither set the home directory is the last resort",
+           chosen == Path.home() / _logrotate.BOOTSTRAP_DIRECTORY_NAME
+           / _logrotate.BOOTSTRAP_LOG_NAME, str(chosen))
+finally:
+    for name, value in (("LOGS_DIRECTORY", original_logs_directory),
+                        ("LOCALAPPDATA", original_localappdata)):
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+# The bootstrap writer runs inside the top-level exception handler. If it can
+# raise, an unwritable log directory replaces the error that stopped the run and
+# the handler's non-zero exit is never reached — the exact way this failure
+# became invisible rather than merely inconvenient.
+original_append = watchdog.append_log
+
+
+def _unwritable(*args, **kwargs):
+    raise PermissionError(13, "the log directory is not writable")
+
+
+try:
+    watchdog.append_log = _unwritable
+    survived = True
+    try:
+        watchdog.write_bootstrap_error(RuntimeError("the original failure"))
+    except OSError:
+        survived = False
+    record("an unwritable bootstrap log does not replace the error being recorded", survived)
+finally:
+    watchdog.append_log = original_append
 
 # The two entry points must agree on what "exhausted" means, and the template
 # must agree with both, or the watchdog and the health monitor act on different
