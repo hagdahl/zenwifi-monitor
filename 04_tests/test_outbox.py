@@ -141,6 +141,34 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
            f"outcome={outcome} surviving={surviving}")
     db.close()
 
+# The per-run delivery bound, on its own database so it cannot perturb the
+# retention counts above. The bound had no coverage at all, so removing the
+# LIMIT left every suite green. It is what stops a backlog built during a long
+# outage from turning the first restored run into a burst the remote
+# destination rate-limits — which would exhaust the retry bound on events that
+# were never the problem.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    db = watchdog.open_db(Path(temp) / "state.sqlite3")
+    bounded = {**CFG, "outbox": {**CFG["outbox"], "max_deliveries_per_run": 3}}
+    sent = []
+    watchdog.notion_event = lambda cfg, status, action, detail: sent.append(action)
+    for index in range(8):
+        watchdog.log_event(db, "Offline", f"Backlog {index}", "queued during an outage")
+    outcome = watchdog.deliver_outbox(db, bounded)
+    record("a delivery run stops at the configured bound",
+           outcome["delivered"] == 3 and len(sent) == 3, f"outcome={outcome} sent={len(sent)}")
+    record("and the rest stay queued rather than being dropped",
+           outcome["pending"] == 5, f"outcome={outcome}")
+    outcome = watchdog.deliver_outbox(db, bounded)
+    record("the next run takes the next batch, oldest first",
+           outcome["delivered"] == 3 and sent == [f"Backlog {index}" for index in range(6)],
+           f"sent={sent}")
+    outcome = watchdog.deliver_outbox(db, bounded)
+    record("a queue shorter than the bound drains completely",
+           outcome["delivered"] == 2 and outcome["pending"] == 0, f"outcome={outcome}")
+    db.close()
+    gc.collect()
+
 # Bootstrap log rotation is bounded and never truncates the active record.
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     import _logrotate

@@ -251,6 +251,13 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--notice", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--detail", default="", help=argparse.SUPPRESS)
+    # Accepted and deliberately never read. The silent launcher is shared with
+    # the watchdog and forwards --execute to whatever it starts, so refusing the
+    # flag would make the health job fail on a machine whose watchdog is
+    # authorized. Parsing it and ignoring it is the whole behaviour: this
+    # process has no branch that a caller could open. `04_tests/test_health.py`
+    # asserts structurally that `args.execute` is never read, so a later edit
+    # cannot quietly give it meaning.
     parser.add_argument("--execute", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.notice:

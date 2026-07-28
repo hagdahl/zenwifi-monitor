@@ -23,8 +23,11 @@ earlier revision of this suite did exactly that.
 """
 import importlib.util
 import json
+import os
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -93,9 +96,21 @@ try:
 
     platform_module._posix_notice = _capture
     platform_module.show_notice("test", "x" * 5000)
+    # Asserting the length equals MESSAGE_LIMIT proves nothing: raising the
+    # constant to 100000 would keep that assertion true while removing the
+    # truncation it exists to check. The bound is therefore stated here
+    # independently of the code under test.
     record("an over-long message is truncated rather than rejected",
-           len(seen.get("message", "")) == platform_module.MESSAGE_LIMIT,
+           0 < len(seen.get("message", "")) <= 1000,
            f"passed {len(seen.get('message', ''))} characters")
+    record("the bound itself is small enough to be a bound",
+           0 < platform_module.MESSAGE_LIMIT <= 1000,
+           f"MESSAGE_LIMIT={platform_module.MESSAGE_LIMIT}")
+
+    seen.clear()
+    platform_module.show_notice("test", "a short message")
+    record("a message inside the bound is passed through unchanged",
+           seen.get("message") == "a short message", repr(seen.get("message")))
 
     # A notification surface that fails must not propagate. Substituting a
     # raising implementation proves the guard, rather than trusting that none
@@ -115,8 +130,83 @@ finally:
 record("spawning a program that does not exist reports failure rather than raising",
        platform_module.spawn_detached([str(ROOT / "no-such-program-40e1f2")]) is False)
 
+# Only the failure path was covered, so a spawn_detached that returned False
+# unconditionally passed every suite — and every notice in the project would
+# have silently stopped appearing. The success path is exercised against a
+# harmless child that exits immediately.
+started = platform_module.spawn_detached([sys.executable, "-c", "pass"])
+record("starting a real program reports success", started is True)
+
+# The call must not wait for the child. The caller is a monitoring run holding
+# the run lease, so a notice that blocks stops monitoring rather than reporting
+# it. A child that sleeps must therefore not delay the return.
+begin = time.monotonic()
+record("starting a long-running program returns immediately",
+       platform_module.spawn_detached(
+           [sys.executable, "-c", "import time; time.sleep(30)"]) is True)
+elapsed = time.monotonic() - begin
+record("and it did not wait for that child", elapsed < 10, f"took {elapsed:.1f}s")
+
 record("the windowless interpreter exists",
        Path(platform_module.windowless_interpreter()).is_file())
+
+# --- the POSIX notification surface, both answers ----------------------------
+# _posix_notice had no coverage at all. It is the only real notification path on
+# Debian, and a version that always returned False would have removed every
+# notice on that platform with every suite still green.
+
+original_run = platform_module.subprocess.run
+original_which = platform_module.shutil.which
+original_environ = dict(os.environ)
+try:
+    for variable in ("DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY", "DISPLAY"):
+        os.environ.pop(variable, None)
+
+    called = []
+    platform_module.shutil.which = lambda name: called.append(name) or "/usr/bin/notify-send"
+
+    class _Completed:
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+    invocations = []
+
+    def _fake_run(arguments, **keywords):
+        invocations.append({"arguments": arguments, "keywords": keywords})
+        return _Completed(0)
+
+    platform_module.subprocess.run = _fake_run
+
+    record("with no session at all there is nothing to notify",
+           platform_module._posix_notice("t", "m", platform_module.LEVEL_WARNING) is False)
+    record("and no notifier is even looked for", not called, str(called))
+
+    os.environ["DISPLAY"] = ":0"
+    record("with a session the notice is shown",
+           platform_module._posix_notice("t", "m", platform_module.LEVEL_WARNING) is True)
+    record("a warning is sent at critical urgency",
+           invocations and "critical" in invocations[-1]["arguments"],
+           str(invocations[-1]["arguments"]) if invocations else "no call")
+    platform_module._posix_notice("t", "m", platform_module.LEVEL_INFO)
+    record("an informational notice is not",
+           "normal" in invocations[-1]["arguments"], str(invocations[-1]["arguments"]))
+    record("the notifier is given a timeout",
+           invocations[-1]["keywords"].get("timeout"), str(invocations[-1]["keywords"]))
+    record("and a non-zero exit is reported rather than raised",
+           invocations[-1]["keywords"].get("check") is False, str(invocations[-1]["keywords"]))
+
+    platform_module.subprocess.run = lambda arguments, **keywords: _Completed(1)
+    record("a notifier that fails is reported as not shown",
+           platform_module._posix_notice("t", "m", platform_module.LEVEL_WARNING) is False)
+
+    platform_module.shutil.which = lambda name: None
+    record("a session without a notifier is reported as not shown",
+           platform_module._posix_notice("t", "m", platform_module.LEVEL_WARNING) is False)
+finally:
+    platform_module.subprocess.run = original_run
+    platform_module.shutil.which = original_which
+    os.environ.clear()
+    os.environ.update(original_environ)
 
 # --- the secret store fails closed on the backend ---------------------------
 
@@ -190,9 +280,6 @@ finally:
 # An unattended Debian service has no desktop keyring, so systemd's encrypted
 # credentials are the store. The presence of the directory is what selects it,
 # so these cases substitute the environment rather than a function.
-
-import os
-import tempfile
 
 original_environ = os.environ.get(secrets_module.CREDENTIALS_DIRECTORY)
 try:

@@ -378,10 +378,23 @@ be closed:
   creates. Ownership and mode are checked rather than the path, because
   `/run/credentials/` is an implementation detail and the permissions are the
   property being relied on.
-- **F15 (high).** Several safety pins assert their own fixture. Removing the code
-  that stamps an outage, the code that clears it, or the dry-run cooldown stamp
-  leaves every suite green, and the cooldown test cannot distinguish the cooldown
-  from the failure window.
+- **F15 - closed.** The offline cases now drive `main()` repeatedly and move
+  only the recorded timestamps, so the run history is written by the code under
+  test rather than seeded by the fixture, and the cooldown case probes at
+  twenty minutes, between the two thresholds it previously could not tell apart.
+  Beyond the finding as written: `probe` and `internet_available` now have
+  coverage at all, including that `any` becoming `all` fails; `validate_config`
+  is exercised rule by rule instead of by two cases standing for the whole
+  function; the delivery gate's Notion half is pinned as well as its flag half;
+  the per-run delivery bound is pinned; the post-restart block is reachable at
+  last, through a substituted `reboot_router`, in its success, failure and
+  refusal forms; the two substring scans in the health suite are replaced by an
+  examination of the parsed module, because a health monitor that spawned the
+  watchdog with `--execute` passed the check named "the health monitor cannot
+  restart the router"; `_posix_notice` and the success path of `spawn_detached`
+  are covered; the installer is run rather than read; and `Install.ps1` is
+  examined with PowerShell's own parser. Every one of these was verified by
+  reverting the behaviour and confirming a suite fails.
 - **F16 (medium).** Documentation asserting behaviour the code does not have,
   including two miscounts in this project's own changelog.
 - **F17 (low).** Smaller items, listed in the report.

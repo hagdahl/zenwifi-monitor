@@ -10,6 +10,7 @@ scheduled job. Temporary directories tolerate cleanup errors because SQLite on
 Windows can hold the write-ahead log briefly after the last connection closes;
 that is a teardown artefact and never affects an assertion.
 """
+import ast
 import gc
 import importlib.util
 import json
@@ -51,10 +52,68 @@ def messages(findings):
     return " ".join(message for _, message in findings)
 
 
+# --- what the health monitor is allowed to be, checked structurally ----------
+#
+# These two properties were checked by searching the source text for "keyring",
+# "asusrouter" and "reboot". Both scans are worthless in the direction that
+# matters. A health monitor that spawned the watchdog with --execute would
+# contain none of those words and would pass the check named "the health
+# monitor cannot restart the router" while restarting the router. The module is
+# therefore parsed and its structure examined.
+
 source = (SRC / "health.py").read_text(encoding="utf-8")
-record("the health monitor imports no third-party dependency",
-       "keyring" not in source and "asusrouter" not in source)
-record("the health monitor cannot restart the router", "reboot" not in source.lower())
+tree = ast.parse(source)
+
+# Independence: every import must be the standard library or this project's own
+# seam. That is stronger than naming two forbidden packages, because the point
+# is that the observer keeps working when the watchdog's dependencies do not —
+# which any third-party import breaks, not only the two anybody thought of.
+OWN_MODULES = {"_defaults", "_logrotate", "_platform", "_secrets"}
+imported = set()
+for node in ast.walk(tree):
+    if isinstance(node, ast.Import):
+        imported.update(alias.name.split(".")[0] for alias in node.names)
+    elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        imported.add(node.module.split(".")[0])
+foreign = sorted(imported - sys.stdlib_module_names - OWN_MODULES)
+record("the health monitor imports only the standard library and its own seam",
+       not foreign, f"foreign imports: {foreign}")
+
+# It can start exactly one thing: itself, to draw a notice. Anything else it
+# could start is a way to act on the machine it is only supposed to observe.
+NOTICE_FLAGS = {"--notice", "--detail"}
+spawns = [node for node in ast.walk(tree)
+          if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+          and node.func.id == "spawn_detached"]
+record("the health monitor spawns something", len(spawns) == 1, f"{len(spawns)} spawn sites")
+for call in spawns:
+    argument = call.args[0] if call.args else None
+    record("the spawn argument list is written out in full, not built elsewhere",
+           isinstance(argument, ast.List), ast.dump(argument) if argument else "no argument")
+    interpreter, program = argument.elts[0], argument.elts[1]
+    record("the spawn runs an interpreter chosen by the seam",
+           isinstance(interpreter, ast.Call) and isinstance(interpreter.func, ast.Name)
+           and interpreter.func.id == "windowless_interpreter", ast.dump(interpreter))
+    record("and the program it runs is this file",
+           isinstance(program, ast.Name) and program.id == "__file__", ast.dump(program))
+    literals = {element.value for element in argument.elts
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)}
+    record("with no argument beyond its own notice flags", literals <= NOTICE_FLAGS,
+           f"unexpected literals: {sorted(literals - NOTICE_FLAGS)}")
+
+# --execute is accepted so the shared silent launcher can forward it, and must
+# never be read. A branch on it is how an observer becomes an actor.
+reads_execute = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Attribute) and node.attr == "execute"
+                 and isinstance(node.value, ast.Name) and node.value.id == "args"]
+record("the health monitor never reads the --execute flag it accepts",
+       not reads_execute, f"{len(reads_execute)} reads")
+
+# And nothing in it names the watchdog's entry point, which is the other way a
+# restart could be reached from here.
+record("nothing in the health monitor names the watchdog entry point",
+       "watchdog.py" not in source and "watchdog" not in imported,
+       "the observer must not be able to start the actor")
 
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     root = Path(temp)
