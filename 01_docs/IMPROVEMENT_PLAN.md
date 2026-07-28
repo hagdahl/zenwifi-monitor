@@ -332,12 +332,18 @@ what was reproduced, what was only read, and what passed, is
 `01_docs/REVIEW_178adf4.md`. Summary of the open items, in the order they should
 be closed:
 
-- **F7 (blocker for production).** The restart decision measures the age of a
-  stored marker, not observed continuous failure, so any gap in monitoring turns
-  a stale marker into a restart on the first failed probe afterwards. Reproduced.
-- **F8 (high).** The outage marker is cleared last in the online branch, after
-  work that can fail, so a partial failure during recovery leaves the restart
-  armed. Reproduced.
+- **F7 - closed.** The restart decision is taken from the recorded runs, not
+  from a stored marker. It now requires both that the last successful run is at
+  least `failure_minutes_before_reboot` old and that at least
+  `monitor.required_failed_runs` failed runs fall inside
+  `monitor.failure_window_minutes`. The second condition is what makes a gap
+  harmless: a machine that was asleep contributes no observations, so history
+  alone can never meet the count. `required_failed_runs` is floored at two in
+  validation, so no configuration can restore the single-observation behaviour.
+- **F8 - closed.** Dissolved by the F7 rewrite rather than patched: the marker
+  is no longer a decision input, so one left behind by a partial failure can
+  cause at most a duplicate log line. It is also now cleared before the work
+  that can fail, and committed with the recovery event.
 - **F9 (high).** Enabling execution in configuration without the invocation flag
   makes retention keep every event and the health monitor report a stalled queue
   for ever. The same class as F1, reached through the other gate. Reproduced.

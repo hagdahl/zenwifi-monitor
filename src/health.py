@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _defaults import (MAX_ATTEMPTS_PER_EVENT, NOTICE_COOLDOWN_MINUTES,  # noqa: E402
+from _defaults import (MAX_ATTEMPTS_PER_EVENT, NOTICE_COOLDOWN_MINUTES, positive_int,  # noqa: E402
                        OUTBOX_AGE_MINUTES, RUN_AGE_MINUTES)
 from _logrotate import append_log, bootstrap_log_path  # noqa: E402
 from _platform import LEVEL_WARNING, show_notice, spawn_detached, windowless_interpreter  # noqa: E402
@@ -31,7 +31,6 @@ def utc_now() -> datetime:
 
 def utc_text(value: datetime | None = None) -> str:
     return (value or utc_now()).isoformat()
-
 
 
 def load_config(path: Path) -> dict:
@@ -85,20 +84,6 @@ def write_notification_stamp(state: str, severity: int, codes: list[str],
         return True
     except OSError:
         return False
-
-
-def positive_int(value, fallback: int) -> int:
-    """Read a threshold defensively.
-
-    The watchdog rejects a malformed configuration loudly at start, but the
-    health monitor is the thing that reports when the watchdog is not running,
-    so it must survive a hand-edited value rather than exit on it.
-    """
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return number if number > 0 else fallback
 
 
 def check_recent_run(db, threshold_minutes: int) -> list[tuple[str, str]]:

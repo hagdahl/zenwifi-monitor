@@ -13,8 +13,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _defaults import (MAX_ATTEMPTS_PER_EVENT, MAX_DELIVERIES_PER_RUN,  # noqa: E402
-                       RETENTION_DAYS, RUN_LEASE_MINUTES)
+from _defaults import (FAILURE_WINDOW_MINUTES, MAX_ATTEMPTS_PER_EVENT,  # noqa: E402
+                       MAX_DELIVERIES_PER_RUN, REQUIRED_FAILED_RUNS,
+                       RETENTION_DAYS, RUN_LEASE_MINUTES, positive_int)
 from _logrotate import append_log, bootstrap_log_path  # noqa: E402
 from _platform import LEVEL_INFO, LEVEL_WARNING, show_notice, spawn_detached, windowless_interpreter  # noqa: E402
 from _secrets import SERVICE, get_secret, require_persistent_secret_store  # noqa: E402
@@ -60,6 +61,16 @@ def validate_config(cfg: dict) -> None:
     for key in ("failure_minutes_before_reboot", "reboot_cooldown_minutes"):
         if not isinstance(cfg["monitor"].get(key), int) or cfg["monitor"][key] <= 0:
             raise RuntimeError(f"monitor.{key} must be a positive integer.")
+    # A floor of two on the required count is deliberate: one observation is
+    # exactly the behaviour that made a monitoring gap sufficient to restart a
+    # router, so no configuration may restore it.
+    window = cfg["monitor"].get("failure_window_minutes", FAILURE_WINDOW_MINUTES)
+    required = cfg["monitor"].get("required_failed_runs", REQUIRED_FAILED_RUNS)
+    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+        raise RuntimeError("monitor.failure_window_minutes must be a positive integer.")
+    if isinstance(required, bool) or not isinstance(required, int) or required < 2:
+        raise RuntimeError("monitor.required_failed_runs must be an integer of at least 2; "
+                           "a single observation must never be enough to restart a router.")
     if cfg.get("execution_mode") not in ("dry-run", "execute"):
         raise RuntimeError("execution_mode must be 'dry-run' or 'execute'.")
     for section, keys in (("outbox", ("max_deliveries_per_run", "max_attempts_per_event", "retention_days")),
@@ -307,6 +318,83 @@ def release_run_lease(db, owner: str) -> None:
         pass
 
 
+def outage_evidence(db, cfg: dict) -> dict:
+    """Describe the outage the recorded runs actually support.
+
+    The restart decision used to be the age of a stored marker that only a
+    successful run cleared. Nothing required a run to have happened in between,
+    so any gap in monitoring — a sleeping machine, a logged-off user, a run that
+    declined the lease — turned a stale marker into a restart on the first
+    failed probe afterwards, on evidence of no outage at all.
+
+    The decision is now taken from the `runs` table, which already records every
+    run and its connectivity result before the decision point. Two independent
+    conditions, both required:
+
+    * duration — the most recent successful run is at least
+      `failure_minutes_before_reboot` old. This preserves the promise the notice
+      and the event text make, and it is what breaks on flapping: one successful
+      run in between moves the reference forward, which is correct, because
+      flapping is not an outage.
+    * evidence — at least `required_failed_runs` failed runs fall within the
+      last `failure_window_minutes`. This is what makes a gap harmless. History
+      cannot satisfy a count taken over a recent window.
+
+    Returns the figures rather than a verdict, so the caller can report what was
+    observed instead of asserting a constant.
+    """
+    now = utc_now()
+    window = positive_int(cfg.get("monitor", {}).get("failure_window_minutes"),
+                          FAILURE_WINDOW_MINUTES)
+    required = positive_int(cfg.get("monitor", {}).get("required_failed_runs"),
+                            REQUIRED_FAILED_RUNS)
+    window_start = utc_text(now - timedelta(minutes=window))
+
+    failed_in_window = db.execute(
+        "SELECT COUNT(*) FROM runs WHERE internet_available = 0 AND timestamp_utc >= ?",
+        (window_start,)).fetchone()[0]
+    last_online_row = db.execute(
+        "SELECT MAX(timestamp_utc) FROM runs WHERE internet_available = 1").fetchone()
+    last_online = last_online_row[0] if last_online_row else None
+
+    if last_online:
+        first_failure_row = db.execute(
+            "SELECT MIN(timestamp_utc) FROM runs WHERE internet_available = 0 "
+            "AND timestamp_utc > ?", (last_online,)).fetchone()
+    else:
+        # No successful run has ever been recorded. The outage is as old as the
+        # oldest failed observation, which is the honest reading for a host that
+        # has been offline since the monitor was installed.
+        first_failure_row = db.execute(
+            "SELECT MIN(timestamp_utc) FROM runs WHERE internet_available = 0").fetchone()
+    outage_started = first_failure_row[0] if first_failure_row else None
+
+    minutes = 0.0
+    if outage_started:
+        try:
+            minutes = (now - datetime.fromisoformat(outage_started)).total_seconds() / 60
+        except (TypeError, ValueError):
+            # A corrupt timestamp must not be read as a long outage. Treating it
+            # as no evidence fails safe: the run records nothing and waits.
+            minutes = 0.0
+    return {"minutes": max(0.0, minutes), "failed_in_window": failed_in_window,
+            "window": window, "required": required, "last_online": last_online}
+
+
+def restart_is_warranted(evidence: dict, cfg: dict) -> bool:
+    """True only when both the duration and the evidence conditions hold."""
+    long_enough = evidence["minutes"] >= cfg["monitor"]["failure_minutes_before_reboot"]
+    witnessed = evidence["failed_in_window"] >= evidence["required"]
+    return long_enough and witnessed
+
+
+def outage_description(evidence: dict) -> str:
+    """State what was observed, rather than asserting the configured constant."""
+    return (f"Internet was unavailable for {int(evidence['minutes'])} minutes, "
+            f"across {evidence['failed_in_window']} failed checks in the last "
+            f"{evidence['window']} minutes.")
+
+
 def notion_is_enabled(cfg: dict) -> bool:
     """Notion is an optional secondary log destination; SQLite is always primary."""
     return bool(cfg.get("notion", {}).get("enabled", False))
@@ -323,9 +411,13 @@ def delivery_is_configured(cfg: dict) -> bool:
     """
     return notion_is_enabled(cfg) and cfg.get("execution_mode") == "execute"
 
-def visible_reboot_notice():
+def visible_reboot_notice(detail: str = ""):
+    """Say what was observed. The threshold is configurable, so asserting a
+    constant here can make the durable record of why a router was restarted
+    wrong."""
     show_notice("Router Watchdog",
-                "Internet has been unavailable for at least 15 minutes. The router is now restarting.",
+                detail or "Internet has been unavailable long enough to warrant a "
+                          "restart. The router is now restarting.",
                 LEVEL_WARNING)
 
 def visible_recovery_notice():
@@ -333,7 +425,7 @@ def visible_recovery_notice():
                 "Internet connectivity has been restored after the router restart.",
                 LEVEL_INFO)
 
-def _spawn_notice(flag: str) -> None:
+def _spawn_notice(flag: str, detail: str = "") -> None:
     """Start a notice in its own process, detached and without a window.
 
     The notice runs in a child rather than inline because a message box is
@@ -341,10 +433,13 @@ def _spawn_notice(flag: str) -> None:
     until somebody dismissed it, and on a scheduled job with no visible desktop
     that is indefinitely. A failure to spawn is deliberately not fatal.
     """
-    spawn_detached([windowless_interpreter(), __file__, flag])
+    arguments = [windowless_interpreter(), __file__, flag]
+    if detail:
+        arguments += ["--detail", detail]
+    spawn_detached(arguments)
 
-def launch_reboot_notice() -> None:
-    _spawn_notice("--notice")
+def launch_reboot_notice(detail: str = "") -> None:
+    _spawn_notice("--notice", detail)
 
 def launch_recovery_notice() -> None:
     _spawn_notice("--recovery-notice")
@@ -355,11 +450,12 @@ def main() -> int:
     parser.add_argument("--execute", action="store_true", help="Allows authorized router and Notion actions.")
     parser.add_argument("--notice", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--recovery-notice", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--detail", default="", help=argparse.SUPPRESS)
     parser.add_argument("--reset-outbox-attempts", action="store_true",
                         help="Clear the retry bound on events that exhausted it, then exit without monitoring.")
     args = parser.parse_args()
     if args.notice:
-        visible_reboot_notice(); return 0
+        visible_reboot_notice(args.detail); return 0
     if args.recovery_notice:
         visible_recovery_notice(); return 0
     if args.config is None:
@@ -400,35 +496,45 @@ def main() -> int:
         # enabled, so the local event table cannot grow without bound in dry-run or
         # in an install that never configured Notion.
         purge_events(db, retention_days, max_attempts, delivery_is_configured(cfg))
+        # first_failure_utc is no longer a decision input. It records only
+        # whether the start of this outage has already been announced, so a
+        # marker left behind by a partial failure can cause at most a duplicate
+        # log line, never a restart. That is what closes F8.
         first_failure = get_state(db, "first_failure_utc")
         if online:
             if get_state(db, "pending_recovery_notification"):
                 launch_recovery_notice()
                 set_state(db, "pending_recovery_notification", "")
+            # Cleared before the work that can fail, and committed with the
+            # event, so an exception in delivery cannot leave a half-recorded
+            # recovery behind.
+            set_state(db, "first_failure_utc", "")
             if first_failure:
-                detail = "Internet connectivity has been restored."
-                log_event(db, "Online", "Restored", detail)
+                log_event(db, "Online", "Restored", "Internet connectivity has been restored.")
+            db.commit()
             if effective_mode == "execute" and notion_is_enabled(cfg):
                 deliver_outbox(db, cfg)
-            set_state(db, "first_failure_utc", ""); db.commit(); return 0
+            return 0
         if not first_failure:
             detail = "All external HTTPS probes failed."
             set_state(db, "first_failure_utc", utc_text()); log_event(db, "Offline", "Monitoring started", detail)
             return 0
-        failure_age = utc_now() - datetime.fromisoformat(first_failure)
-        if failure_age < timedelta(minutes=cfg["monitor"]["failure_minutes_before_reboot"]): return 0
+        evidence = outage_evidence(db, cfg)
+        if not restart_is_warranted(evidence, cfg): return 0
         last_attempt = get_state(db, "last_reboot_attempt_utc")
         if last_attempt and utc_now() - datetime.fromisoformat(last_attempt) < timedelta(minutes=cfg["monitor"]["reboot_cooldown_minutes"]): return 0
         if effective_mode != "execute":
             set_state(db, "last_reboot_attempt_utc", utc_text())
-            log_event(db, "Offline", "Dry-run", "Restart condition met; no external action in dry-run."); return 0
+            log_event(db, "Offline", "Dry-run",
+                      f"Restart condition met; no external action in dry-run. {outage_description(evidence)}")
+            return 0
         set_state(db, "last_reboot_attempt_utc", utc_text()); db.commit()
-        launch_reboot_notice()
+        launch_reboot_notice(outage_description(evidence))
         try:
             if not asyncio.run(reboot_router(cfg)): raise RuntimeError("The router rejected the restart request.")
         except Exception as error:
             log_event(db, "Error", "Restart failed", str(error)); return 1
-        set_state(db, "last_reboot_utc", utc_text()); set_state(db, "pending_recovery_notification", "1"); set_state(db, "first_failure_utc", ""); log_event(db, "Restarted", "Router restarted", "Internet was unavailable for at least 15 minutes.")
+        set_state(db, "last_reboot_utc", utc_text()); set_state(db, "pending_recovery_notification", "1"); set_state(db, "first_failure_utc", ""); log_event(db, "Restarted", "Router restarted", outage_description(evidence))
         if notion_is_enabled(cfg):
             deliver_outbox(db, cfg)
         return 0

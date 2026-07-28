@@ -96,6 +96,29 @@ def events(database, action):
     return count
 
 
+def age_runs(database, minutes_ago):
+    """Backdate the recorded runs so elapsed time can be simulated.
+
+    The runs themselves are written by main() on the real code path; only the
+    clock is manipulated. That is the difference between exercising the code and
+    seeding the value the code is supposed to derive — the mistake this suite
+    made before, which let the line that stamps an outage be deleted with every
+    suite still green.
+    """
+    db = watchdog.open_db(database)
+    rows = db.execute("SELECT id FROM runs ORDER BY id").fetchall()
+    for offset, (row_id,) in zip(minutes_ago, rows):
+        db.execute("UPDATE runs SET timestamp_utc=? WHERE id=?",
+                   (watchdog.utc_text(watchdog.utc_now() - timedelta(minutes=offset)), row_id))
+    db.commit(); db.close(); gc.collect()
+
+
+def failed_runs(database, count):
+    """Drive main() `count` times against an offline probe, for real."""
+    for _ in range(count):
+        assert call_main(config_for(database)) == 0
+
+
 # The remote delivery gate: both the flag and the configured mode are required,
 # exactly like the restart gate above.
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
@@ -115,31 +138,99 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     assert delivered, "an authorized online run must drain the outbox"
     gc.collect()
 
-# The failure window: nothing is decided before the configured threshold.
+# The restart decision is taken from observed runs, not from a stored marker.
+# Each case drives main() repeatedly so the run history is written by the code
+# under test, and only the recorded timestamps are moved to simulate elapsed
+# time.
+
+# Not enough elapsed time, even with enough observations.
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     database, config = build(temp, "dry-run", False, online=False)
-    db = watchdog.open_db(database)
-    watchdog.set_state(db, "first_failure_utc", watchdog.utc_text(watchdog.utc_now() - timedelta(minutes=5)))
-    db.commit(); db.close()
+    for _ in range(3):
+        assert call_main(config) == 0
+    age_runs(database, [8, 6, 4])
     assert call_main(config) == 0
-    assert events(database, "Dry-run") == 0, "the restart decision must wait for the failure window"
+    assert events(database, "Dry-run") == 0, "the decision must wait for the failure window"
+    gc.collect()
 
-    db = watchdog.open_db(database)
-    watchdog.set_state(db, "first_failure_utc", watchdog.utc_text(watchdog.utc_now() - timedelta(minutes=16)))
-    db.commit(); db.close()
+# Enough elapsed time AND enough observations.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=False)
+    for _ in range(3):
+        assert call_main(config) == 0
+    age_runs(database, [20, 12, 6])
     assert call_main(config) == 0
-    assert events(database, "Dry-run") == 1, "the decision must be reached once the window has passed"
+    assert events(database, "Dry-run") == 1, "the decision must be reached on real evidence"
+    gc.collect()
+
+# THE REGRESSION THIS REPLACES. A single failed observation after a long gap
+# used to reach the decision, because the age of a stored marker was the whole
+# test. One failure now cannot satisfy the count however old the outage looks.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=False)
+    assert call_main(config) == 0          # one failure, long ago
+    age_runs(database, [9 * 60])
+    assert call_main(config) == 0          # the machine wakes; one failed probe
+    assert events(database, "Dry-run") == 0, \
+        "a single observation after a monitoring gap must not restart anything"
+    gc.collect()
+
+# Flapping is not an outage: one successful run moves the reference forward.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=False)
+    for _ in range(3):
+        assert call_main(config) == 0
+    age_runs(database, [25, 20, 15])
+    watchdog.internet_available = lambda _: True
+    assert call_main(config) == 0          # connectivity returns
+    watchdog.internet_available = lambda _: False
+    for _ in range(3):
+        assert call_main(config) == 0      # and fails again, three times, just now
+    assert events(database, "Dry-run") == 0, \
+        "a successful run between failures must reset the duration"
+    gc.collect()
+
+# Recovery must clear the announcement marker, so the next outage is announced
+# again. Since the marker is no longer a decision input this is a log defect
+# rather than a safety one, but an outage that starts without a "Monitoring
+# started" line is a gap in the record.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=False)
+    assert call_main(config) == 0
+    assert events(database, "Monitoring started") == 1, "the first outage is announced"
+    watchdog.internet_available = lambda _: True
+    assert call_main(config) == 0
+    db = watchdog.open_db(database)
+    assert watchdog.get_state(db, "first_failure_utc") == "", \
+        "recovery must clear the announcement marker"
+    db.close(); gc.collect()
+    watchdog.internet_available = lambda _: False
+    assert call_main(config) == 0
+    assert events(database, "Monitoring started") == 2, \
+        "a later outage must be announced again"
     gc.collect()
 
 # The cooldown: a second decision inside the window is suppressed.
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     database, config = build(temp, "dry-run", False, online=False)
+    for _ in range(3):
+        assert call_main(config) == 0
+    age_runs(database, [40, 30, 20])
     db = watchdog.open_db(database)
-    watchdog.set_state(db, "first_failure_utc", watchdog.utc_text(watchdog.utc_now() - timedelta(minutes=60)))
     watchdog.set_state(db, "last_reboot_attempt_utc", watchdog.utc_text())
     db.commit(); db.close()
     assert call_main(config) == 0
     assert events(database, "Dry-run") == 0, "the cooldown must suppress a second decision"
+
+    # 20 minutes lies between the failure window (15) and the cooldown (30), so
+    # this probe point fails if the code reads the wrong threshold. The previous
+    # points, 0 and 45, fell the same side of both and could not tell them apart.
+    db = watchdog.open_db(database)
+    watchdog.set_state(db, "last_reboot_attempt_utc",
+                       watchdog.utc_text(watchdog.utc_now() - timedelta(minutes=20)))
+    db.commit(); db.close()
+    assert call_main(config) == 0
+    assert events(database, "Dry-run") == 0, "20 minutes is inside the 30-minute cooldown"
 
     db = watchdog.open_db(database)
     watchdog.set_state(db, "last_reboot_attempt_utc",
