@@ -56,6 +56,13 @@ jobs:
       - run: python 04_tests/test_watchdog.py
       - run: python 04_tests/test_outbox.py
       - run: python 04_tests/test_health.py
+      # test_deploy.py skips its behavioural install unless it is root, and the
+      # runner is not. That skip is recorded rather than silent, but a recorded
+      # skip is still no coverage, and the finding it exists to catch is about
+      # file ownership — precisely what an unprivileged run cannot observe. So
+      # the suite is run once more under sudo. It imports only the standard
+      # library, and PATH is preserved so it is the same interpreter.
+      - run: sudo -E env "PATH=$PATH" python 04_tests/test_deploy.py
       # The launcher suite reports itself skipped off Windows by design: it
       # drives a Windows Script Host wrapper that has no Linux counterpart
       # until the systemd deployment path in section 6 of the plan lands.
