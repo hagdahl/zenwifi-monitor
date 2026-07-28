@@ -116,8 +116,15 @@ PYVERSION
   # behind by an older version would survive an upgrade and keep being importable.
   rm -rf "${PREFIX}/src"
   install -d -m 0755 -o root -g root "${PREFIX}/src"
-  find "${SOURCE_DIR}/src" -maxdepth 1 -type f -name '*.py' \
-    -exec install -m 0644 -o root -g root {} "${PREFIX}/src/" \;
+  # One command, not `find -exec`. GNU find exits 0 even when every -exec
+  # command failed, and `set -e` therefore sees success: with ${PREFIX}/src
+  # already removed, a failure here would destroy a working installation's code
+  # and then carry on to build the environment, install the units, enable both
+  # timers and report "Installed". The router would be safe, because the unit
+  # cannot import what is not there, but the monitor would be dead and the
+  # operator would have been told the opposite. A glob that matches nothing
+  # also fails here, which is the right answer for an empty source tree.
+  install -m 0644 -o root -g root "${SOURCE_DIR}"/src/*.py "${PREFIX}/src/"
   # configure.py is standard-library only, so it works before the environment
   # exists; it is installed alongside so an operator can validate and migrate
   # the configuration on the target host rather than only at build time.

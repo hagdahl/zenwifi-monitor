@@ -75,8 +75,12 @@ record("the execution drop-in clears ExecStart before setting it",
 record("the execution drop-in is what adds --execute",
        len(dropin_exec) == 2 and dropin_exec[1].endswith("--execute"),
        str(dropin_exec[-1:]))
-record("only --enable-execution writes the drop-in",
-       'ENABLE_EXECUTION" -eq 1' in INSTALLER or 'ENABLE_EXECUTION}" -eq 1' in INSTALLER)
+# There used to be a check here named "only --enable-execution writes the
+# drop-in", satisfied by finding the string `ENABLE_EXECUTION" -eq 1` anywhere
+# in the script. It could not fail for the reason its name gave: an installer
+# that also wrote the drop-in from the --install branch still contained that
+# string. The property is now established by running a plain --install and
+# looking at the machine, further down.
 
 # --- the health observer stays an observer -----------------------------------
 
@@ -203,13 +207,38 @@ def _namespace_prerequisites():
     return None
 
 
-def _run_installer(work: Path, log_directory_mode: int | None = None):
-    """Run install.sh --install (and --enable-execution) in a fresh namespace.
+# Everything this install can write, and everything a previous one may have
+# left. All of it is removed inside the namespace before the installer runs.
+# The unit directory belongs on this list for the same reason as the rest: an
+# overlay shows the host's files through its lower layer, so a machine that
+# really runs the monitor would otherwise supply the very drop-in whose absence
+# is the safety property under test.
+INSTALLED_PATHS = (
+    "/opt/zenwifi-monitor",
+    "/etc/zenwifi-monitor",
+    "/var/lib/zenwifi-monitor",
+    "/var/log/zenwifi-monitor",
+    "/etc/systemd/system/zenwifi-monitor.service",
+    "/etc/systemd/system/zenwifi-monitor.timer",
+    "/etc/systemd/system/zenwifi-monitor-health.service",
+    "/etc/systemd/system/zenwifi-monitor-health.timer",
+    "/etc/systemd/system/zenwifi-monitor.service.d",
+)
 
-    Returns the parsed report, or the completed process when the install was
-    expected to refuse. `log_directory_mode` restricts /var/log before the
-    install, which is how the refusal path is reached: the service account owns
-    its own log directory but cannot traverse into it.
+
+def _run_installer(work: Path, log_directory_mode: int | None = None):
+    """Run install.sh in a fresh namespace, probing after each phase.
+
+    Two probes, not one. The property that matters most is what a plain
+    `--install` leaves behind, and a harness that runs `--enable-execution`
+    before looking cannot see it: an installer that opened activation gate 1
+    during a default install would pass. So the state is recorded after
+    `--install`, and again after `--enable-execution`.
+
+    Returns the completed process and the two reports. `log_directory_mode`
+    restricts /var/log before the install, which is how the refusal path is
+    reached: the service account owns its own log directory but cannot traverse
+    into it.
     """
     stub = work / "stub"
     stub.mkdir(parents=True)
@@ -233,7 +262,7 @@ def _run_installer(work: Path, log_directory_mode: int | None = None):
         (work / "layers" / name.strip("/").replace("/", "-") / "work").mkdir(parents=True)
 
     probe = (
-        "import json, os, pwd, stat\n"
+        "import json, os, pwd, stat, sys\n"
         "from pathlib import Path\n"
         "def entry(name):\n"
         "    p = Path(name)\n"
@@ -260,7 +289,14 @@ def _run_installer(work: Path, log_directory_mode: int | None = None):
         "report['unit'] = Path('/etc/systemd/system/zenwifi-monitor.service').read_text()\n"
         "drop = Path('/etc/systemd/system/zenwifi-monitor.service.d/10-execute.conf')\n"
         "report['dropin'] = drop.read_text() if drop.is_file() else None\n"
-        "Path(os.environ['REPORT']).write_text(json.dumps(report))\n")
+        "report['dropin_directory'] = "
+        "Path('/etc/systemd/system/zenwifi-monitor.service.d').is_dir()\n"
+        # Gate 2 lives in the installed configuration, so it is read back from
+        # the installed file rather than from the template in the checkout.
+        "installed = Path('/etc/zenwifi-monitor/config.json')\n"
+        "report['execution_mode'] = (json.loads(installed.read_text(encoding='utf-8-sig'))\n"
+        "                            .get('execution_mode') if installed.is_file() else None)\n"
+        "Path(sys.argv[1]).write_text(json.dumps(report))\n")
     (work / "probe.py").write_text(probe, encoding="utf-8")
 
     restrict = (f"chmod {log_directory_mode:o} /var/log\n"
@@ -281,31 +317,40 @@ def _run_installer(work: Path, log_directory_mode: int | None = None):
         # The overlay shows the host's own directories through, so an existing
         # installation on the machine running the suite would otherwise be read
         # as this install's output. Removing them touches the upper layer only.
-        "rm -rf /opt/zenwifi-monitor /etc/zenwifi-monitor "
-        "/var/lib/zenwifi-monitor /var/log/zenwifi-monitor\n"
+        f"rm -rf {' '.join(INSTALLED_PATHS)}\n"
+        # And prove the slate is clean, rather than assuming the list above is
+        # complete. A path that survives means this run would be reporting on
+        # somebody else's install, which is worse than not running at all.
+        "for path in " + " ".join(INSTALLED_PATHS) + "; do\n"
+        "  if [ -e \"$path\" ]; then echo \"$path survived the reset\" >&2; exit 91; fi\n"
+        "done\n"
         # A module left behind by an older version must not survive an upgrade,
         # so plant one and let the report say whether it is still importable.
         "mkdir -p /opt/zenwifi-monitor/src\n"
         "touch /opt/zenwifi-monitor/src/_removed_in_a_later_version.py\n"
         f"{restrict}"
         f"export PATH={work}/stub:$PATH\n"
-        f"REPORT={work}/report.json\n"
-        "export REPORT\n"
         f"if ! bash {ROOT}/deploy/debian/install.sh --install > {work}/install.out 2> {work}/install.err; then\n"
         f"  echo refused > {work}/refused\n"
         "  exit 0\n"
         "fi\n"
+        # Probed before anything is activated. This is the state a default
+        # install leaves, and the only place the absence of gate 1 can be seen.
+        f"{sys.executable} {work}/probe.py {work}/report-install.json\n"
         f"runuser -u zenwifi -- test -w /var/log/zenwifi-monitor && echo yes > {work}/log_writable || true\n"
         f"bash {ROOT}/deploy/debian/install.sh --enable-execution > {work}/enable.out 2>&1\n"
-        f"{sys.executable} {work}/probe.py\n")
+        f"{sys.executable} {work}/probe.py {work}/report-enable.json\n")
     (work / "driver.sh").write_text(driver, encoding="utf-8")
 
     completed = subprocess.run(
         ["unshare", "--mount", "--propagation", "private", "bash", str(work / "driver.sh")],
         capture_output=True, text=True, timeout=600)
-    report_path = work / "report.json"
-    report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else None
-    return completed, report
+
+    def _read(name):
+        path = work / name
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    return completed, _read("report-install.json"), _read("report-enable.json")
 
 
 skip_reason = _namespace_prerequisites()
@@ -314,10 +359,10 @@ if skip_reason is None:
 
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
-        completed, report = _run_installer(work)
+        completed, report, after_enable = _run_installer(work)
         installer_error = (work / "install.err").read_text(encoding="utf-8") if (work / "install.err").is_file() else ""
         record("the installer completes against a clean prefix",
-               completed.returncode == 0 and report is not None,
+               completed.returncode == 0 and report is not None and after_enable is not None,
                f"exit {completed.returncode}: {completed.stderr[-400:]} {installer_error[-400:]}")
 
         entries = report["entries"]
@@ -368,19 +413,40 @@ if skip_reason is None:
         record("the service account can write its log directory after an install",
                (work / "log_writable").is_file())
 
-        # Both activation gates, observed rather than read.
+        # --- what a default install leaves behind --------------------------
+        #
+        # Both gates, observed on the installed machine after `--install` and
+        # before anything is activated. This is the project's primary safety
+        # property and it was previously unpinned: the harness ran
+        # --enable-execution before it looked, so an installer that opened
+        # gate 1 during a plain --install passed every check.
         installed_exec = directive(report["unit"], "ExecStart")
-        record("an installed system cannot restart a router until asked",
+        record("a default install leaves one ExecStart and it carries no --execute",
                len(installed_exec) == 1 and "--execute" not in installed_exec[0],
                str(installed_exec))
+        record("a default install writes no execution drop-in at all",
+               report["dropin"] is None and not report["dropin_directory"],
+               f"dropin={report['dropin']!r} directory={report['dropin_directory']}")
+        record("and gate 2 is closed in the configuration it installed",
+               report["execution_mode"] == "dry-run", str(report["execution_mode"]))
         record("the installer says execution is off",
                "Production execution is OFF" in (work / "install.out").read_text(encoding="utf-8"))
-        record("--enable-execution writes the drop-in and nothing else does",
-               report["dropin"] is not None and "--execute" in report["dropin"],
-               str(report["dropin"]))
+
+        # --- and what --enable-execution changes, and only it ---------------
+        record("--enable-execution is what writes the drop-in",
+               after_enable["dropin"] is not None and "--execute" in after_enable["dropin"],
+               str(after_enable["dropin"]))
         record("the drop-in clears ExecStart before setting it",
-               directive(report["dropin"], "ExecStart")[0] == "",
-               str(directive(report["dropin"], "ExecStart")))
+               directive(after_enable["dropin"], "ExecStart")[0] == "",
+               str(directive(after_enable["dropin"], "ExecStart")))
+        # Opening gate 1 must not quietly open gate 2 as well. The two are
+        # independent by design and the installer says so in as many words.
+        record("opening gate 1 leaves gate 2 exactly as it was",
+               after_enable["execution_mode"] == "dry-run",
+               str(after_enable["execution_mode"]))
+        record("and it does not rewrite the base unit",
+               after_enable["unit"] == report["unit"],
+               "the drop-in, not the unit, is what carries --execute")
 
         calls = (work / "systemctl.log").read_text(encoding="utf-8")
         record("the installer reloads systemd and enables both timers",
@@ -393,7 +459,7 @@ if skip_reason is None:
     # script fixes that, so the gate is the only thing that can stop the run.
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
-        completed, report = _run_installer(work, log_directory_mode=0o700)
+        completed, report, _ = _run_installer(work, log_directory_mode=0o700)
         refused = (work / "refused").is_file()
         message = (work / "install.err").read_text(encoding="utf-8") if (work / "install.err").is_file() else ""
         record("an install that would leave the bootstrap log unwritable refuses", refused,

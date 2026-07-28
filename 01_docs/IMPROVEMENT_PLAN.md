@@ -395,6 +395,18 @@ be closed:
   are covered; the installer is run rather than read; and `Install.ps1` is
   examined with PowerShell's own parser. Every one of these was verified by
   reverting the behaviour and confirming a suite fails.
+
+  Corrected after the fifth round, which did not uphold this closure on first
+  submission. The activation gate inside `install.sh --install` was still
+  unpinned: the harness ran `--enable-execution` before it looked, so an
+  installer that opened gate 1 during a default install passed all 84 checks.
+  The state after `--install` is now probed on its own — no drop-in, no
+  drop-in directory, and `dry-run` in the configuration it wrote — before
+  `--enable-execution` runs and is probed again. The reset inside the namespace
+  now also clears the unit files and the drop-in directory, because an overlay
+  showed a real installation's drop-in through its lower layer and answered for
+  the install under test. Both were confirmed by reproducing the reviewer's own
+  mutations and watching them fail.
 - **F16 (medium).** Documentation asserting behaviour the code does not have,
   including two miscounts in this project's own changelog.
 - **F17 (low).** Smaller items, listed in the report.
