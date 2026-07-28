@@ -407,9 +407,32 @@ be closed:
   showed a real installation's drop-in through its lower layer and answered for
   the install under test. Both were confirmed by reproducing the reviewer's own
   mutations and watching them fail.
-- **F16 (medium).** Documentation asserting behaviour the code does not have,
-  including two miscounts in this project's own changelog.
-- **F17 (low).** Smaller items, listed in the report.
+- **F16 - closed.** Every item verified against the code and corrected:
+  `AUTHENTICATION.md` on the systemd credential path, which it had contradicted
+  since the Debian work landed; the launcher described as taking an arbitrary
+  path in `HANDOVER.md` and `USER_GUIDE.md` when it allows exactly two entry
+  points; an AsusRouter method named in the changelog that does not exist;
+  ADR-015's three source modules, now six; ADR-018's claim that exactly two
+  behaviours branch on the platform, where `bootstrap_log_path` is a third and
+  F11 was a bug in precisely that third; `README.md` calling Debian support
+  planned; and the Debian guide's `--init` command, which could not succeed in
+  the documented order. The F6 remedy, recorded as applied to `ARCHITECTURE.md`
+  and `HANDOVER.md` and applied to neither, has now been written into both. The
+  two "all nine suites" miscounts were corrected in the previous round.
+- **F17 - closed.** Two of the ten were decisions for the owner rather than
+  defects, and he took them: a restart bound of three within six hours, and a
+  TLS fingerprint recorded and compared with a warning rather than a refusal on
+  change. The rest were fixed as read: booleans and floors on the two safety
+  thresholds and a cooldown that must be at least the outage threshold; an upper
+  bound on the run lease; a future lease timestamp reclaimed instead of locking
+  the monitor out for the skew, and consecutive skips counted so a leaked lease
+  is visible; `--disable-execution` on Debian, which had no way to close gate 1
+  at all, and an install over an open gate that says so; the unpinned `pip`
+  upgrade removed from both installers; `router.use_tls` validated at runtime
+  rather than only at the moment it is written; a malformed timestamp becoming a
+  health finding instead of killing the observer; and a schema migration that
+  loses a race with the other schedule tolerated. Concurrent log rotation was
+  already tolerated and is pinned. Every one was revert-checked.
 
 The owner has been informed of F7 and has chosen to leave production execution
 enabled pending the fix. That acceptance is recorded in the report.

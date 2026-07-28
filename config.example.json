@@ -16,6 +16,8 @@
     "run_lease_minutes": 10,
     "failure_window_minutes": 30,
     "required_failed_runs": 3,
+    "max_restarts_per_window": 3,
+    "restart_window_hours": 6,
     "probe_urls": [
       "https://www.msftconnecttest.com/connecttest.txt",
       "https://www.cloudflare.com/cdn-cgi/trace"

@@ -20,12 +20,14 @@ DROPIN_DIR="${UNIT_DIR}/zenwifi-monitor.service.d"
 DROPIN="${DROPIN_DIR}/10-execute.conf"
 
 ENABLE_EXECUTION=0
+DISABLE_EXECUTION=0
 SET_CREDENTIALS=0
 DO_INSTALL=0
 
 usage() {
   cat <<'USAGE'
 Usage: install.sh [--install] [--set-credentials] [--enable-execution]
+                  [--disable-execution]
 
   --install            Create the service account, the environment and the
                        directories, install the units, and enable the timers.
@@ -37,6 +39,9 @@ Usage: install.sh [--install] [--set-credentials] [--enable-execution]
                        unit. This is one of the two gates; the configuration
                        still decides the other. Refuses without --install
                        having been run first.
+  --disable-execution  Remove that drop-in, closing gate 1 again. Nothing else
+                       could: the gate was one-way, so the only documented way
+                       back was editing systemd's directories by hand.
 
 With no option this prints what would happen and changes nothing.
 USAGE
@@ -47,6 +52,7 @@ for argument in "$@"; do
     --install) DO_INSTALL=1 ;;
     --set-credentials) SET_CREDENTIALS=1 ;;
     --enable-execution) ENABLE_EXECUTION=1 ;;
+    --disable-execution) DISABLE_EXECUTION=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: ${argument}" >&2; usage >&2; exit 2 ;;
   esac
@@ -61,7 +67,13 @@ require_root() {
   fi
 }
 
-if [[ "${DO_INSTALL}" -eq 0 && "${SET_CREDENTIALS}" -eq 0 && "${ENABLE_EXECUTION}" -eq 0 ]]; then
+if [[ "${ENABLE_EXECUTION}" -eq 1 && "${DISABLE_EXECUTION}" -eq 1 ]]; then
+  echo "--enable-execution and --disable-execution are opposites; choose one." >&2
+  exit 2
+fi
+
+if [[ "${DO_INSTALL}" -eq 0 && "${SET_CREDENTIALS}" -eq 0 && "${ENABLE_EXECUTION}" -eq 0 \
+      && "${DISABLE_EXECUTION}" -eq 0 ]]; then
   echo "Dry run. Nothing was changed."
   echo "  source           ${SOURCE_DIR}"
   echo "  install prefix   ${PREFIX}"
@@ -136,10 +148,16 @@ PYVERSION
   install -m 0644 -o root -g root "${SOURCE_DIR}/requirements.lock.txt" "${PREFIX}/requirements.lock.txt"
 
   python3 -m venv "${PREFIX}/venv"
+  # NOT `pip install --upgrade pip` first. That fetched an unpinned, unhashed
+  # distribution from the network and then used it to enforce the hash checking
+  # below, which put the tool that verifies the supply chain outside the supply
+  # chain it verifies. The interpreter's bundled pip has supported
+  # --require-hashes for years; if it ever needs upgrading, pin it in
+  # requirements.in so it arrives hashed like everything else.
+  #
   # --require-hashes: pip refuses the whole set unless every artefact matches a
   # recorded hash, so a substituted distribution fails the install rather than
   # reaching a service that can restart a router.
-  "${PREFIX}/venv/bin/python" -m pip install --upgrade pip
   "${PREFIX}/venv/bin/python" -m pip install --require-hashes -r "${PREFIX}/requirements.lock.txt"
   "${PREFIX}/venv/bin/python" -m pip check
 
@@ -155,10 +173,25 @@ PYVERSION
 
   install -m 0644 "${SOURCE_DIR}/deploy/debian"/zenwifi-monitor*.service "${UNIT_DIR}/"
   install -m 0644 "${SOURCE_DIR}/deploy/debian"/zenwifi-monitor*.timer "${UNIT_DIR}/"
+  # An install over a system whose gate 1 was already open leaves it open. That
+  # is the correct behaviour - reinstalling is not a request to change the
+  # activation state - but saying "Production execution is OFF" regardless was
+  # not, so the state is reported rather than assumed.
+  if [[ -f "${DROPIN}" ]]; then
+    EXECUTION_ALREADY_ENABLED=1
+  else
+    EXECUTION_ALREADY_ENABLED=0
+  fi
   systemctl daemon-reload
   systemctl enable --now zenwifi-monitor.timer zenwifi-monitor-health.timer
 
-  echo "Installed. Production execution is OFF."
+  if [[ "${EXECUTION_ALREADY_ENABLED}" -eq 1 ]]; then
+    echo "Installed. Gate 1 was ALREADY OPEN and has been left that way:"
+    echo "  ${DROPIN} still adds --execute."
+    echo "Run install.sh --disable-execution to close it."
+  else
+    echo "Installed. Production execution is OFF."
+  fi
 fi
 
 if [[ "${SET_CREDENTIALS}" -eq 1 ]]; then
@@ -207,4 +240,19 @@ DROPIN_BODY
   systemctl daemon-reload
   echo "Gate 1 is now open: the unit carries --execute."
   echo "Gate 2 is execution_mode in ${CONFIG_DIR}/config.json. Both are required."
+fi
+
+
+if [[ "${DISABLE_EXECUTION}" -eq 1 ]]; then
+  require_root
+  if [[ ! -f "${DROPIN}" ]]; then
+    echo "Gate 1 is already closed: ${DROPIN} does not exist."
+    exit 0
+  fi
+  rm -f "${DROPIN}"
+  rmdir "${DROPIN_DIR}" 2>/dev/null || true
+  systemctl daemon-reload
+  echo "Gate 1 is now closed: the unit no longer carries --execute."
+  echo "execution_mode in ${CONFIG_DIR}/config.json is unchanged; this command"
+  echo "does not touch the configuration."
 fi

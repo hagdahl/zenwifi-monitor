@@ -2,10 +2,13 @@
 # ZenWiFi Monitor version: 0.1.0
 import argparse
 import asyncio
+import hashlib
 import os
 import json
 import re
+import socket
 import sqlite3
+import ssl
 import sys
 import urllib.error
 import urllib.request
@@ -14,7 +17,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _defaults import (FAILURE_WINDOW_MINUTES, MAX_ATTEMPTS_PER_EVENT,  # noqa: E402
-                       MAX_DELIVERIES_PER_RUN, REQUIRED_FAILED_RUNS,
+                       MAX_DELIVERIES_PER_RUN, MAX_RESTARTS_PER_WINDOW,
+                       MAX_RUN_LEASE_MINUTES, MIN_THRESHOLD_MINUTES,
+                       REQUIRED_FAILED_RUNS, RESTART_WINDOW_HOURS,
                        RETENTION_DAYS, RUN_LEASE_MINUTES, positive_int)
 from _logrotate import append_log, bootstrap_log_path  # noqa: E402
 from _platform import LEVEL_INFO, LEVEL_WARNING, show_notice, spawn_detached, windowless_interpreter  # noqa: E402
@@ -87,9 +92,51 @@ def validate_config(cfg: dict) -> None:
     urls = cfg["monitor"].get("probe_urls")
     if not isinstance(urls, list) or not urls or not all(isinstance(url, str) and url.startswith("https://") for url in urls):
         raise RuntimeError("monitor.probe_urls must be a non-empty list of HTTPS URLs.")
+    # `isinstance(True, int)` holds, so a bare int check accepted True for both
+    # of the thresholds the restart decision reads — and True is 1, which with
+    # no floor meant a one-minute outage and a one-minute cooldown. The outbox
+    # loop below already excluded booleans; the safety-critical pair did not.
     for key in ("failure_minutes_before_reboot", "reboot_cooldown_minutes"):
-        if not isinstance(cfg["monitor"].get(key), int) or cfg["monitor"][key] <= 0:
+        value = cfg["monitor"].get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < MIN_THRESHOLD_MINUTES:
+            raise RuntimeError(
+                f"monitor.{key} must be an integer of at least {MIN_THRESHOLD_MINUTES}; "
+                "a threshold shorter than one probe interval cannot describe an "
+                "observation the monitor is able to make.")
+    # A cooldown shorter than the outage threshold lets a second restart be
+    # decided on evidence the first one already used, because a restart that did
+    # not help leaves the same run history in place.
+    if cfg["monitor"]["reboot_cooldown_minutes"] < cfg["monitor"]["failure_minutes_before_reboot"]:
+        raise RuntimeError(
+            "monitor.reboot_cooldown_minutes must be at least "
+            "monitor.failure_minutes_before_reboot, or a restart can be repeated "
+            "on evidence that has already been acted on.")
+    lease = cfg["monitor"].get("run_lease_minutes")
+    if lease is not None and (isinstance(lease, bool) or not isinstance(lease, int)
+                              or not 1 <= lease <= MAX_RUN_LEASE_MINUTES):
+        raise RuntimeError(
+            f"monitor.run_lease_minutes must be an integer between 1 and "
+            f"{MAX_RUN_LEASE_MINUTES}. The lease is honoured until it expires, so a "
+            "larger value stops monitoring for as long as it names.")
+    for key, limit in (("max_restarts_per_window", MAX_RESTARTS_PER_WINDOW),
+                       ("restart_window_hours", RESTART_WINDOW_HOURS)):
+        value = cfg["monitor"].get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                  or value < 1):
             raise RuntimeError(f"monitor.{key} must be a positive integer.")
+    # TLS is the default and the only mode that does not send the router
+    # password in clear text. The typed confirmation in configure.py guards the
+    # moment it is written; this guards every run afterwards, because the value
+    # can be hand-edited and nothing else would notice.
+    use_tls = cfg["router"].get("use_tls", True)
+    if not isinstance(use_tls, bool):
+        raise RuntimeError("router.use_tls must be true or false.")
+    if use_tls is False and cfg["router"].get("insecure_http_acknowledged") is not True:
+        raise RuntimeError(
+            "router.use_tls is false, which sends the router password over plain "
+            "HTTP. That is allowed only when router.insecure_http_acknowledged is "
+            "true as well. Run configure.py --allow-insecure-http rather than "
+            "editing the value by hand.")
     # A floor of two on the required count is deliberate: one observation is
     # exactly the behaviour that made a monitoring gap sufficient to restart a
     # router, so no configuration may restore it.
@@ -113,6 +160,22 @@ def validate_config(cfg: dict) -> None:
             if key in values and (not isinstance(values[key], int) or isinstance(values[key], bool) or values[key] <= 0):
                 raise RuntimeError(f"{section}.{key} must be a positive integer.")
 
+def add_column(db, table: str, column: str, definition: str) -> None:
+    """Add a column, tolerating another process having just added it.
+
+    The watchdog and the health monitor open the same database on their own
+    timers, so both can read `PRAGMA table_info` before either writes. The loser
+    of that race raised `duplicate column name` and died — a migration that only
+    fails when two schedules happen to coincide, which is the kind that is found
+    in production rather than in a suite.
+    """
+    try:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError as error:
+        if "duplicate column name" not in str(error).lower():
+            raise
+
+
 def open_db(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
@@ -124,13 +187,14 @@ def open_db(path: Path) -> sqlite3.Connection:
     db.execute("CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, timestamp_utc TEXT NOT NULL, internet_available INTEGER NOT NULL, execution_mode TEXT NOT NULL, configured_execution_mode TEXT NOT NULL)")
     columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
     if "configured_execution_mode" not in columns:
-        db.execute("ALTER TABLE runs ADD COLUMN configured_execution_mode TEXT NOT NULL DEFAULT 'unknown'")
+        add_column(db, "runs", "configured_execution_mode",
+                   "TEXT NOT NULL DEFAULT 'unknown'")
     event_columns = {row[1] for row in db.execute("PRAGMA table_info(events)")}
     for column, definition in (("delivery_attempts", "INTEGER NOT NULL DEFAULT 0"),
                                ("last_delivery_attempt_utc", "TEXT"),
                                ("last_delivery_error", "TEXT")):
         if column not in event_columns:
-            db.execute(f"ALTER TABLE events ADD COLUMN {column} {definition}")
+            add_column(db, "events", column, definition)
     db.execute("CREATE TABLE IF NOT EXISTS health (id INTEGER PRIMARY KEY, timestamp_utc TEXT NOT NULL, "
                "state TEXT NOT NULL, severity INTEGER NOT NULL, detail TEXT NOT NULL)")
     # One row at most. The single-row constraint is the lock: two runs cannot
@@ -329,6 +393,11 @@ def acquire_run_lease(db, owner: str, minutes: int) -> bool:
                 held_since = None
             # An unparseable timestamp is treated as stale rather than as a
             # permanent lock, so a corrupt row cannot silently stop monitoring.
+            # So is one in the future: a clock that jumped forward, or a lease
+            # written by a host whose clock is wrong, would otherwise lock this
+            # monitor out for the whole of the skew with nothing to show for it.
+            if held_since is not None and held_since > utc_now():
+                held_since = None
             if held_since is not None and held_since > cutoff:
                 db.rollback()
                 return False
@@ -435,6 +504,110 @@ def outage_description(evidence: dict) -> str:
             f"{evidence['window']} minutes.")
 
 
+def restart_bound(cfg: dict) -> tuple[int, int]:
+    """How many restarts are allowed, and over how many hours."""
+    monitor = cfg.get("monitor", {})
+    return (positive_int(monitor.get("max_restarts_per_window"), MAX_RESTARTS_PER_WINDOW),
+            positive_int(monitor.get("restart_window_hours"), RESTART_WINDOW_HOURS))
+
+
+def restarts_this_episode(db, cfg: dict, evidence: dict) -> int:
+    """Restart decisions taken since connectivity was last seen, inside the window.
+
+    An outage upstream of the router is indistinguishable, from here, from one
+    the router causes — and a restart cannot fix it. Without a bound the monitor
+    restarts the router once per cooldown for as long as the operator's fault
+    lasts, which is neither useful nor harmless.
+
+    The count starts at the last successful run rather than at a fixed point in
+    the past, so connectivity returning clears it: the bound is about one
+    episode, not about the clock. The window is a second, outer limit, so a host
+    that has never once been online cannot accumulate a count reaching back for
+    ever.
+
+    Dry-run decisions are counted alongside real restarts. A soak should show
+    the operator exactly the behaviour production would have, including the
+    point at which it gives up.
+    """
+    _, window_hours = restart_bound(cfg)
+    since = utc_text(utc_now() - timedelta(hours=window_hours))
+    if evidence.get("last_online") and evidence["last_online"] > since:
+        since = evidence["last_online"]
+    return db.execute(
+        "SELECT COUNT(*) FROM events WHERE action IN ('Router restarted', 'Dry-run') "
+        "AND timestamp_utc > ?", (since,)).fetchone()[0]
+
+
+ROUTER_FINGERPRINT_KEY = "router_tls_fingerprint"
+ROUTER_FINGERPRINT_SEEN_KEY = "router_tls_fingerprint_seen"
+
+
+def router_fingerprint(cfg: dict, timeout: float = 10.0) -> str | None:
+    """The SHA-256 of the certificate the router is presenting, or None.
+
+    Standard library only and deliberately unvalidated, for the same reason
+    `scripts/configure.py` does not validate it: a home router presents a
+    self-signed certificate, and refusing it would push the operator to plain
+    HTTP. The handshake proves the transport is encrypted and nothing else, so
+    the fingerprint is what makes a change visible at all.
+    """
+    if not cfg.get("router", {}).get("use_tls", True):
+        return None
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    host = cfg["router"]["host"]
+    port = cfg["router"].get("management_port", cfg["router"].get("https_port", 8443))
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as secure:
+                der = secure.getpeercert(binary_form=True)
+                return hashlib.sha256(der).hexdigest() if der else None
+    except (OSError, ssl.SSLError, ValueError):
+        return None
+
+
+def check_router_identity(db, cfg: dict) -> bool:
+    """Compare the router's certificate with the one previously recorded.
+
+    Trust on first use: the first fingerprint seen is recorded, and every later
+    run compares against it. A change is reported and the run continues — a
+    self-signed certificate that is simply renewed must not silence monitoring,
+    and by the time this runs the alternative is leaving a router unrestarted
+    during an outage. What it must not do is pass in silence.
+
+    The configured value wins when there is one, because that is a deliberate
+    statement by the operator; otherwise the recorded one does, so an install
+    that predates this check still gains it without being reconfigured.
+    """
+    actual = router_fingerprint(cfg)
+    if not actual:
+        # Unreachable, or plain HTTP by explicit acknowledgement. Neither is
+        # evidence of a changed identity, and neither is a reason to leave a
+        # router unrestarted during an outage.
+        return True
+    expected = (cfg.get("router", {}).get("tls_fingerprint_sha256")
+                or get_state(db, ROUTER_FINGERPRINT_KEY))
+    set_state(db, ROUTER_FINGERPRINT_SEEN_KEY, actual)
+    if not expected:
+        set_state(db, ROUTER_FINGERPRINT_KEY, actual)
+        db.commit()
+        log_event(db, "Info", "Router certificate recorded",
+                  f"First observation of the router's certificate: SHA-256 {actual}. "
+                  "Later runs compare against it.")
+        return True
+    db.commit()
+    if actual == expected:
+        return True
+    log_event(db, "Warning", "Router certificate changed",
+              f"The router is presenting a different certificate. Recorded SHA-256 "
+              f"{expected}, now {actual}. The restart proceeds, because a renewed "
+              "self-signed certificate is the ordinary explanation, but nothing here "
+              "verified either one. Confirm the router, then run configure.py "
+              "--accept-router-certificate to record the new value.")
+    return False
+
+
 def notion_is_enabled(cfg: dict) -> bool:
     """Notion is an optional secondary log destination; SQLite is always primary."""
     return bool(cfg.get("notion", {}).get("enabled", False))
@@ -526,9 +699,17 @@ def main() -> int:
         # error: the run that holds the lease is doing the work. The skip is
         # recorded so a lease that is taken every cycle is visible as evidence
         # rather than only as absent runs.
+        # Counted as well as stamped. One skip is ordinary; a lease taken every
+        # cycle means a run is leaking it, and the health monitor can only see
+        # that if the number is recorded. The counter is cleared by the next run
+        # that actually proceeds.
+        skipped = positive_int(get_state(db, "consecutive_skipped_runs"), 0)
+        set_state(db, "consecutive_skipped_runs", str(skipped + 1))
         set_state(db, "last_skipped_run_utc", utc_text()); db.commit()
         return 0
     try:
+        if get_state(db, "consecutive_skipped_runs") not in (None, "0"):
+            set_state(db, "consecutive_skipped_runs", "0"); db.commit()
         effective_mode = "execute" if args.execute and cfg["execution_mode"] == "execute" else "dry-run"
         online = internet_available(cfg["monitor"]["probe_urls"])
         log_run(db, online, effective_mode, cfg["execution_mode"])
@@ -569,6 +750,27 @@ def main() -> int:
         if not restart_is_warranted(evidence, cfg): return 0
         last_attempt = get_state(db, "last_reboot_attempt_utc")
         if last_attempt and utc_now() - datetime.fromisoformat(last_attempt) < timedelta(minutes=cfg["monitor"]["reboot_cooldown_minutes"]): return 0
+        # The bound on repetition. An outage a restart cannot fix looks exactly
+        # like one it can, so without this the router is restarted once per
+        # cooldown for as long as an upstream fault lasts. Announced once per
+        # episode, because the point is to be noticed, not to fill the log.
+        allowed, window_hours = restart_bound(cfg)
+        already = restarts_this_episode(db, cfg, evidence)
+        if already >= allowed:
+            if get_state(db, "restart_bound_reached_utc") != str(evidence.get("last_online") or ""):
+                set_state(db, "restart_bound_reached_utc", str(evidence.get("last_online") or ""))
+                log_event(db, "Warning", "Restart bound reached",
+                          f"{already} restarts have already been decided since connectivity "
+                          f"was last seen, which is the limit of {allowed} in "
+                          f"{window_hours} hours. No further restart will be attempted "
+                          f"until the connection returns. {outage_description(evidence)} "
+                          "An outage upstream of the router cannot be fixed by restarting it.")
+                launch_reboot_notice(
+                    f"The Internet has been down for {int(evidence['minutes'])} minutes and "
+                    f"{already} restarts have not helped. No further restart will be "
+                    "attempted until the connection returns. This usually means the fault "
+                    "is with the operator rather than the router.")
+            return 0
         if effective_mode != "execute":
             set_state(db, "last_reboot_attempt_utc", utc_text())
             log_event(db, "Offline", "Dry-run",
@@ -576,6 +778,11 @@ def main() -> int:
             return 0
         set_state(db, "last_reboot_attempt_utc", utc_text()); db.commit()
         launch_reboot_notice(outage_description(evidence))
+        # Checked here, immediately before the credentials are sent, because
+        # that is the moment a substituted endpoint would matter. It reports and
+        # continues; leaving a router unrestarted during an outage on the
+        # evidence of a renewed self-signed certificate would be the worse call.
+        check_router_identity(db, cfg)
         try:
             if not asyncio.run(reboot_router(cfg)): raise RuntimeError("The router rejected the restart request.")
         except Exception as error:

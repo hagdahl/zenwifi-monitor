@@ -6,12 +6,24 @@ on, whether an unattended service can restart a router. The suite therefore
 pins the properties that carry the safety model across, and validates the
 units with systemd's own parser rather than by reading them hopefully.
 
-What this suite does NOT establish: that the units behave correctly under a
-running systemd on a real Debian host. `systemd-analyze verify` parses and
-resolves; it does not start anything. The installer has been run end to end on
-a Linux system with systemctl substituted, so its file, account and dependency
-work is exercised, but no timer has ever fired on a real installation. That
-gap is stated in the improvement plan; it is not closed by this suite passing.
+What this suite does NOT establish, stated once here rather than implied
+anywhere:
+
+* That the units behave correctly under a running systemd on a real Debian
+  host. `systemd-analyze verify` parses and resolves; it does not start
+  anything, and no timer has ever fired on a real installation.
+* That the dependency set installs. The installer is run for real, but the
+  environment step is substituted: the stub interpreter fabricates
+  `venv/bin/python` as a script that exits zero, so all three `pip` commands —
+  including the `--require-hashes` install this project treats as a supply
+  chain control — are no-ops here. CI covers that separately by installing the
+  lock file for the suite's own interpreter.
+* That the service account is created. `useradd` runs only when the account is
+  absent, so on a host that already has it the account work is skipped.
+
+The file, ownership and activation work is exercised, on the real script at its
+real paths. That gap list is otherwise stated in the improvement plan; it is not
+closed by this suite passing.
 """
 import json
 import os
@@ -165,6 +177,25 @@ if os.name == "posix" and shutil.which("bash"):
 else:
     record("installer checks skipped: not a POSIX host", True, "skipped")
 
+# --- the supply chain the installer enforces ----------------------------------
+# `pip install --upgrade pip` fetched an unpinned, unhashed distribution and
+# then used it to enforce the hash checking below. This is a text check by
+# necessity: the behavioural run substitutes the environment step, so the only
+# place the absence is observable is the script.
+# Comments are stripped first. The script explains at that very line why the
+# upgrade was removed, so scanning the whole file would find the words in the
+# explanation and fail — the same trap `directive` above exists to avoid, and
+# this check walked straight into it on first run.
+INSTALLER_CODE = "\n".join(line for line in INSTALLER.splitlines()
+                           if not line.lstrip().startswith("#"))
+record("the installer does not fetch an unpinned pip before enforcing hashes",
+       "--upgrade pip" not in INSTALLER_CODE,
+       "pip must not be installed outside the hash-locked set it then verifies")
+record("and every dependency install requires hashes",
+       INSTALLER_CODE.count("pip install") == INSTALLER_CODE.count("--require-hashes"),
+       f"{INSTALLER_CODE.count('pip install')} installs, "
+       f"{INSTALLER_CODE.count('--require-hashes')} hash-checked")
+
 # --- the installer, actually run ----------------------------------------------
 #
 # Everything above reads the script. That is how an earlier revision concluded
@@ -187,6 +218,11 @@ else:
 # which is stated above and in the improvement plan.
 
 OVERLAID = ("/etc", "/opt", "/var/lib", "/var/log")
+
+# An identity that is not root and is not the service account. The number is
+# arbitrary and nothing on the host needs to own it: the copy it owns lives in
+# a temporary directory and is deleted with it.
+UNPRIVILEGED_UID = 65123
 
 
 def _namespace_prerequisites():
@@ -301,6 +337,17 @@ def _run_installer(work: Path, log_directory_mode: int | None = None):
 
     restrict = (f"chmod {log_directory_mode:o} /var/log\n"
                 if log_directory_mode is not None else "")
+    # The installer is run against a copy of the checkout owned by somebody
+    # other than root, because that is the documented situation: `sudo` from a
+    # user-owned clone. Run from a root-owned clone the ownership assertions
+    # cannot discriminate at all — `cp -a` would preserve root and every check
+    # would pass — so the finding they exist to catch would be invisible on any
+    # machine where the suite is run with sudo from a root-owned tree.
+    source = work / "source"
+    shutil.copytree(ROOT, source,
+                    ignore=shutil.ignore_patterns("__pycache__", ".git", "_public", "*.sqlite3"))
+    for path in [source, *source.rglob("*")]:
+        os.chown(path, UNPRIVILEGED_UID, UNPRIVILEGED_UID)
     # Overlays rather than tmpfs, including over /opt. A tmpfs there also hides
     # whatever else the host keeps under /opt — on a GitHub runner that is the
     # Python toolchain this very test runs, so the installer's interpreter
@@ -330,7 +377,7 @@ def _run_installer(work: Path, log_directory_mode: int | None = None):
         "touch /opt/zenwifi-monitor/src/_removed_in_a_later_version.py\n"
         f"{restrict}"
         f"export PATH={work}/stub:$PATH\n"
-        f"if ! bash {ROOT}/deploy/debian/install.sh --install > {work}/install.out 2> {work}/install.err; then\n"
+        f"if ! bash {source}/deploy/debian/install.sh --install > {work}/install.out 2> {work}/install.err; then\n"
         f"  echo refused > {work}/refused\n"
         "  exit 0\n"
         "fi\n"
@@ -338,8 +385,18 @@ def _run_installer(work: Path, log_directory_mode: int | None = None):
         # install leaves, and the only place the absence of gate 1 can be seen.
         f"{sys.executable} {work}/probe.py {work}/report-install.json\n"
         f"runuser -u zenwifi -- test -w /var/log/zenwifi-monitor && echo yes > {work}/log_writable || true\n"
-        f"bash {ROOT}/deploy/debian/install.sh --enable-execution > {work}/enable.out 2>&1\n"
-        f"{sys.executable} {work}/probe.py {work}/report-enable.json\n")
+        f"bash {source}/deploy/debian/install.sh --enable-execution > {work}/enable.out 2>&1\n"
+        f"{sys.executable} {work}/probe.py {work}/report-enable.json\n"
+        # Re-installing over an open gate must leave it open — reinstalling is
+        # not a request to change the activation state — but it must say so
+        # rather than print that execution is off regardless.
+        f"bash {source}/deploy/debian/install.sh --install > {work}/reinstall.out 2>&1\n"
+        f"{sys.executable} {work}/probe.py {work}/report-reinstall.json\n"
+        # And the gate must be closable. It was one-way: nothing in the project
+        # removed the drop-in, so the only documented way back was editing
+        # systemd's directories by hand.
+        f"bash {source}/deploy/debian/install.sh --disable-execution > {work}/disable.out 2>&1\n"
+        f"{sys.executable} {work}/probe.py {work}/report-disable.json\n")
     (work / "driver.sh").write_text(driver, encoding="utf-8")
 
     completed = subprocess.run(
@@ -350,7 +407,8 @@ def _run_installer(work: Path, log_directory_mode: int | None = None):
         path = work / name
         return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
 
-    return completed, _read("report-install.json"), _read("report-enable.json")
+    return (completed, _read("report-install.json"), _read("report-enable.json"),
+            _read("report-reinstall.json"), _read("report-disable.json"))
 
 
 skip_reason = _namespace_prerequisites()
@@ -359,10 +417,11 @@ if skip_reason is None:
 
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
-        completed, report, after_enable = _run_installer(work)
+        completed, report, after_enable, after_reinstall, after_disable = _run_installer(work)
         installer_error = (work / "install.err").read_text(encoding="utf-8") if (work / "install.err").is_file() else ""
         record("the installer completes against a clean prefix",
-               completed.returncode == 0 and report is not None and after_enable is not None,
+               completed.returncode == 0 and all(r is not None for r in
+                                                 (report, after_enable, after_reinstall, after_disable)),
                f"exit {completed.returncode}: {completed.stderr[-400:]} {installer_error[-400:]}")
 
         entries = report["entries"]
@@ -382,8 +441,21 @@ if skip_reason is None:
             record(f"{name} is not writable by group or other",
                    not item["mode"] & 0o022, oct(item["mode"]))
 
+        # The installer copies `-maxdepth 1 -name '*.py'`. Comparing against a
+        # top-level-only glob would restate that rule rather than check it, so
+        # a subpackage added under src/ would be dropped from the install with
+        # this check still green. The expectation is taken from everything the
+        # module tree contains, and the restriction the installer relies on is
+        # asserted separately — so adding a subpackage fails here, loudly,
+        # rather than shipping a Debian install missing part of the program.
+        subdirectories = sorted(p.name for p in (ROOT / "src").iterdir()
+                                if p.is_dir() and p.name != "__pycache__")
+        record("the module tree is flat, which is what the installer assumes",
+               not subdirectories,
+               f"{subdirectories} would be silently omitted from a Debian install")
         record("the installed modules are exactly the project's modules",
-               report["src"] == sorted(p.name for p in (ROOT / "src").glob("*.py")),
+               report["src"] == sorted(p.name for p in (ROOT / "src").rglob("*.py")
+                                       if "__pycache__" not in p.parts),
                str(report["src"]))
         record("a module from an older version does not survive the install",
                "_removed_in_a_later_version.py" not in report["src"], str(report["src"]))
@@ -448,6 +520,27 @@ if skip_reason is None:
                after_enable["unit"] == report["unit"],
                "the drop-in, not the unit, is what carries --execute")
 
+        # --- reinstalling, and closing the gate again -----------------------
+        record("re-installing over an open gate leaves it open",
+               after_reinstall["dropin"] is not None and "--execute" in after_reinstall["dropin"],
+               str(after_reinstall["dropin"]))
+        reinstall_output = (work / "reinstall.out").read_text(encoding="utf-8")
+        record("and it says so instead of claiming execution is off",
+               "ALREADY OPEN" in reinstall_output
+               and "Production execution is OFF" not in reinstall_output,
+               reinstall_output[-300:])
+
+        record("--disable-execution removes the drop-in",
+               after_disable["dropin"] is None and not after_disable["dropin_directory"],
+               f"dropin={after_disable['dropin']!r} "
+               f"directory={after_disable['dropin_directory']}")
+        record("and it leaves the configuration alone",
+               after_disable["execution_mode"] == after_enable["execution_mode"],
+               f"{after_enable['execution_mode']} -> {after_disable['execution_mode']}")
+        record("and it says which gate it closed and which it did not",
+               "no longer carries --execute" in (work / "disable.out").read_text(encoding="utf-8"),
+               (work / "disable.out").read_text(encoding="utf-8")[-200:])
+
         calls = (work / "systemctl.log").read_text(encoding="utf-8")
         record("the installer reloads systemd and enables both timers",
                "daemon-reload" in calls
@@ -459,7 +552,7 @@ if skip_reason is None:
     # script fixes that, so the gate is the only thing that can stop the run.
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
-        completed, report, _ = _run_installer(work, log_directory_mode=0o700)
+        completed, report, *_ = _run_installer(work, log_directory_mode=0o700)
         refused = (work / "refused").is_file()
         message = (work / "install.err").read_text(encoding="utf-8") if (work / "install.err").is_file() else ""
         record("an install that would leave the bootstrap log unwritable refuses", refused,

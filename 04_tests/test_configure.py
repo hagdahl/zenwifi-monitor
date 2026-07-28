@@ -237,5 +237,70 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     record("nothing is written when the confirmation cannot be given",
            not target.exists())
 
+# --- the router's certificate, recorded rather than verified -----------------
+# Nothing here validates the certificate, by design: a home router's is
+# self-signed. Recording the fingerprint is what turns "no trust at all" into
+# trust on first use, and this is the deliberate half of it.
+
+def certificate_module(target, *, fingerprint, extra=()):
+    original_probe = configure.PROBE_TLS
+    original_argv = sys.argv
+    try:
+        configure.PROBE_TLS = (lambda host, port, timeout=10.0:
+                               {"protocol": "TLSv1.3", "cipher": "test", "subject": "CN=test",
+                                "fingerprint_sha256": fingerprint}
+                               if fingerprint else None)
+        sys.argv = ["configure.py", "--config", str(target),
+                    "--accept-router-certificate", *extra]
+        return configure.main()
+    finally:
+        configure.PROBE_TLS = original_probe
+        sys.argv = original_argv
+
+
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    target = Path(temp) / "config.local.json"
+
+    record("--init records the fingerprint the router presented",
+           init_module(target, tls=True, extra=("--apply",), ) == 0)
+    written = json.loads(target.read_text(encoding="utf-8"))
+    # The stub in init_module returns no fingerprint, so the key must be absent
+    # rather than empty: an empty string is a placeholder, and the monitor's own
+    # validator rejects those. Absent means "not recorded yet".
+    record("an absent fingerprint is omitted rather than written empty",
+           written["router"].get("tls_fingerprint_sha256") is None,
+           str(written["router"]))
+
+    record("--accept-router-certificate is a dry run by default",
+           certificate_module(target, fingerprint="c" * 64) == 0)
+    unchanged = json.loads(target.read_text(encoding="utf-8"))
+    record("and it changes nothing without --apply",
+           unchanged["router"].get("tls_fingerprint_sha256") is None,
+           str(unchanged["router"]))
+
+    record("--accept-router-certificate records it with --apply",
+           certificate_module(target, fingerprint="c" * 64, extra=("--apply",)) == 0)
+    recorded = json.loads(target.read_text(encoding="utf-8"))
+    record("the fingerprint is written to the configuration",
+           recorded["router"]["tls_fingerprint_sha256"] == "c" * 64,
+           str(recorded["router"]))
+    record("and the result still satisfies the monitor's own validator",
+           configure.validate(target) == 0)
+
+    record("a router that will not complete a handshake records nothing",
+           certificate_module(target, fingerprint=None, extra=("--apply",)) == 1)
+    record("and the previously recorded value survives that refusal",
+           json.loads(target.read_text(encoding="utf-8"))["router"]["tls_fingerprint_sha256"]
+           == "c" * 64)
+
+    # There is no certificate to record on a plain-HTTP configuration, and
+    # pretending otherwise would suggest the transport had been checked.
+    plain = json.loads(target.read_text(encoding="utf-8"))
+    plain["router"]["use_tls"] = False
+    plain["router"]["insecure_http_acknowledged"] = True
+    target.write_text(json.dumps(plain, indent=2) + "\n", encoding="utf-8")
+    record("a plain-HTTP configuration has no certificate to record",
+           certificate_module(target, fingerprint="d" * 64, extra=("--apply",)) == 2)
+
 print(json.dumps({"suite": "configure", "results": results}, indent=2))
 print("configuration tool smoke test: OK")

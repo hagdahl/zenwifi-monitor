@@ -2,9 +2,10 @@
 import gc
 import importlib.util
 import json
+import sqlite3
 import sys
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 spec = importlib.util.spec_from_file_location("watchdog", Path(__file__).parents[1] / "src" / "watchdog.py")
 watchdog = importlib.util.module_from_spec(spec); spec.loader.exec_module(watchdog)
@@ -553,5 +554,234 @@ try:
 finally:
     watchdog.reboot_router = original_reboot
     watchdog.launch_reboot_notice = original_reboot_notice
+
+# --- the rules the thresholds must satisfy -----------------------------------
+# `isinstance(True, int)` holds, so True passed as a threshold and meant 1.
+
+MORE_INVALID = [
+    ("a boolean failure threshold", broken(monitor={"failure_minutes_before_reboot": True})),
+    ("a boolean cooldown", broken(monitor={"reboot_cooldown_minutes": True})),
+    ("a failure threshold below one probe interval",
+     broken(monitor={"failure_minutes_before_reboot": 1, "reboot_cooldown_minutes": 1})),
+    ("a cooldown below one probe interval",
+     broken(monitor={"failure_minutes_before_reboot": 5, "reboot_cooldown_minutes": 2})),
+    # A cooldown shorter than the outage threshold lets a second restart be
+    # decided on evidence the first one already acted on, because a restart that
+    # did not help leaves the same run history behind.
+    ("a cooldown shorter than the outage threshold",
+     broken(monitor={"failure_minutes_before_reboot": 30, "reboot_cooldown_minutes": 15})),
+    ("a lease of zero minutes", broken(monitor={"run_lease_minutes": 0})),
+    ("a lease longer than the bound",
+     broken(monitor={"run_lease_minutes": watchdog.MAX_RUN_LEASE_MINUTES + 1})),
+    ("a boolean lease", broken(monitor={"run_lease_minutes": True})),
+    ("a restart bound of zero", broken(monitor={"max_restarts_per_window": 0})),
+    ("a restart window of zero", broken(monitor={"restart_window_hours": 0})),
+    ("use_tls that is not a boolean", broken(router={"use_tls": "yes"})),
+    # Plain HTTP sends the router password in clear text. The typed confirmation
+    # in configure.py guards the moment it is written; this guards every run
+    # afterwards, because the value can be hand-edited.
+    ("plain HTTP without the acknowledgement", broken(router={"use_tls": False})),
+    ("plain HTTP with the acknowledgement set to something else",
+     broken(router={"use_tls": False, "insecure_http_acknowledged": "yes"})),
+]
+for label, candidate in MORE_INVALID:
+    try:
+        pristine.validate_config(candidate)
+    except RuntimeError:
+        continue
+    raise AssertionError(f"validate_config accepted an invalid configuration: {label}")
+
+pristine.validate_config(broken(router={"use_tls": False, "insecure_http_acknowledged": True}))
+pristine.validate_config(broken(monitor={"run_lease_minutes": watchdog.MAX_RUN_LEASE_MINUTES}))
+
+# --- the bound on repetition -------------------------------------------------
+# An outage upstream of the router is indistinguishable from one the router
+# causes, and a restart cannot fix it. Without a bound the monitor restarts the
+# router once per cooldown for as long as the operator's fault lasts.
+
+def bounded_config(temp, allowed=2):
+    root = Path(temp); database = root / "state.sqlite3"; config = root / "config.json"
+    config.write_text(json.dumps({
+        "paths": {"state_database": str(database)},
+        "router": {"host": "router.invalid", "management_port": 8443, "use_tls": True},
+        "monitor": {"probe_urls": ["https://invalid.example"],
+                    "failure_minutes_before_reboot": 5, "reboot_cooldown_minutes": 5,
+                    "max_restarts_per_window": allowed, "restart_window_hours": 6},
+        "notion": {"enabled": False, "data_source_id": "d", "api_version": "v"},
+        "execution_mode": "dry-run",
+    }), encoding="utf-8")
+    watchdog.require_persistent_secret_store = lambda: None
+    watchdog.internet_available = lambda _: False
+    return database, config
+
+
+def space_runs(database, spacing=5):
+    """Rewrite every recorded run so they are `spacing` minutes apart, newest now."""
+    db = watchdog.open_db(database)
+    rows = [row[0] for row in db.execute("SELECT id FROM runs ORDER BY id")]
+    for index, row_id in enumerate(rows):
+        offset = (len(rows) - 1 - index) * spacing
+        db.execute("UPDATE runs SET timestamp_utc=? WHERE id=?",
+                   (watchdog.utc_text(watchdog.utc_now() - timedelta(minutes=offset)), row_id))
+    db.commit(); db.close(); gc.collect()
+
+
+def elapse_cooldown(database):
+    db = watchdog.open_db(database)
+    watchdog.set_state(db, "last_reboot_attempt_utc",
+                       watchdog.utc_text(watchdog.utc_now() - timedelta(hours=1)))
+    db.commit(); db.close(); gc.collect()
+
+
+def decide(database, config):
+    """One run that should reach the decision point, with the cooldown elapsed."""
+    space_runs(database)
+    elapse_cooldown(database)
+    assert call_main(config) == 0
+
+
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = bounded_config(temp, allowed=2)
+    notices = []
+    watchdog.launch_reboot_notice = lambda detail="": notices.append(detail)
+    for _ in range(3):
+        assert call_main(config) == 0
+    decide(database, config)
+    assert events(database, "Dry-run") == 1, "the first decision must be reached"
+    decide(database, config)
+    assert events(database, "Dry-run") == 2, "the second is still inside the bound"
+
+    decide(database, config)
+    assert events(database, "Dry-run") == 2, \
+        "a third decision must be refused once the bound is reached"
+    assert events(database, "Restart bound reached") == 1, "and the refusal must be recorded"
+    assert notices and "no further restart" in notices[-1].lower(), \
+        f"the person at the machine must be told: {notices[-1:]}"
+
+    # Announced once per episode, not once per run: the point is to be noticed,
+    # not to fill the log the operator then has to read.
+    decide(database, config)
+    decide(database, config)
+    assert events(database, "Dry-run") == 2, "the bound must keep holding"
+    assert events(database, "Restart bound reached") == 1, \
+        "the refusal must not be repeated every run"
+
+    # Connectivity returning ends the episode, so the count starts again. The
+    # bound is about one outage, not about the clock.
+    #
+    # The earlier decisions are backdated first. Everything above happened
+    # within a second of real time, so without that the "previous" episode's
+    # events would still be newer than the recovery this case is about — an
+    # artefact of the simulation, not of the rule under test.
+    db = watchdog.open_db(database)
+    for row_id, stamp in db.execute("SELECT id, timestamp_utc FROM events").fetchall():
+        db.execute("UPDATE events SET timestamp_utc=? WHERE id=?",
+                   (watchdog.utc_text(datetime.fromisoformat(stamp) - timedelta(hours=2)), row_id))
+    db.commit(); db.close(); gc.collect()
+
+    watchdog.internet_available = lambda _: True
+    assert call_main(config) == 0
+    watchdog.internet_available = lambda _: False
+    for _ in range(3):
+        assert call_main(config) == 0
+    decide(database, config)
+    assert events(database, "Dry-run") == 3, \
+        "a restored connection must clear the count, or one bad day disables the monitor"
+    gc.collect()
+
+# --- the router's identity ----------------------------------------------------
+# Nothing verifies the router's certificate, by design: it is self-signed. The
+# fingerprint is what makes a change visible at all.
+
+original_fingerprint = watchdog.router_fingerprint
+try:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+        database, _ = build(temp, "dry-run", False, online=False)
+        db = watchdog.open_db(database)
+
+        watchdog.router_fingerprint = lambda cfg, timeout=10.0: "a" * 64
+        cfg = {"router": {"host": "router.invalid", "use_tls": True}}
+        record_ok = watchdog.check_router_identity(db, cfg)
+        assert record_ok is True, "a first observation is not a mismatch"
+        assert watchdog.get_state(db, watchdog.ROUTER_FINGERPRINT_KEY) == "a" * 64, \
+            "the first fingerprint must be recorded, or nothing can be compared later"
+        assert db.execute("SELECT COUNT(*) FROM events WHERE action='Router certificate recorded'"
+                          ).fetchone()[0] == 1
+
+        assert watchdog.check_router_identity(db, cfg) is True, "the same certificate matches"
+
+        watchdog.router_fingerprint = lambda cfg, timeout=10.0: "b" * 64
+        assert watchdog.check_router_identity(db, cfg) is False, "a changed certificate is a mismatch"
+        detail = db.execute("SELECT detail FROM events WHERE action='Router certificate changed'"
+                            ).fetchone()
+        assert detail is not None, "a changed certificate must be recorded"
+        assert watchdog.get_state(db, watchdog.ROUTER_FINGERPRINT_SEEN_KEY) == "b" * 64, \
+            "what was seen must be recorded, or the health monitor cannot report it"
+
+        # A configured value outranks the recorded one: it is a deliberate
+        # statement by an operator, and the recorded one is only a first sight.
+        configured = {"router": {"host": "router.invalid", "use_tls": True,
+                                 "tls_fingerprint_sha256": "b" * 64}}
+        assert watchdog.check_router_identity(db, configured) is True
+
+        # An unreachable router is not evidence of a changed identity, and must
+        # not stop a restart during an outage.
+        watchdog.router_fingerprint = lambda cfg, timeout=10.0: None
+        assert watchdog.check_router_identity(db, cfg) is True
+        db.close(); gc.collect()
+finally:
+    watchdog.router_fingerprint = original_fingerprint
+
+# --- the lease, when a clock or a process misbehaves --------------------------
+
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=True)
+    assert call_main(config) == 0
+
+    # A lease timestamp in the future would otherwise lock this monitor out for
+    # the whole of the skew, with nothing recorded to explain the silence.
+    db = watchdog.open_db(database)
+    watchdog.acquire_run_lease(db, "someone-else", watchdog.RUN_LEASE_MINUTES)
+    db.execute("UPDATE run_lease SET acquired_utc=? WHERE id=1",
+               (watchdog.utc_text(watchdog.utc_now() + timedelta(days=1)),))
+    db.commit(); db.close(); gc.collect()
+    assert call_main(config) == 0
+    assert runs_recorded(database) == 2, "a lease dated in the future must be reclaimed"
+
+    # Skips are counted as well as stamped, so a leaked lease is visible as a
+    # number rather than only as an absence of runs.
+    for expected in (1, 2, 3):
+        db = watchdog.open_db(database)
+        watchdog.acquire_run_lease(db, "holder", watchdog.RUN_LEASE_MINUTES)
+        db.close(); gc.collect()
+        assert call_main(config) == 0
+        db = watchdog.open_db(database)
+        actual = watchdog.get_state(db, "consecutive_skipped_runs")
+        db.close(); gc.collect()
+        assert actual == str(expected), f"expected {expected} skips, state said {actual}"
+
+    db = watchdog.open_db(database)
+    db.execute("DELETE FROM run_lease"); db.commit(); db.close(); gc.collect()
+    assert call_main(config) == 0
+    db = watchdog.open_db(database)
+    assert watchdog.get_state(db, "consecutive_skipped_runs") == "0", \
+        "a run that proceeds must clear the counter, or the finding never goes away"
+    db.close(); gc.collect()
+
+# --- schema migration under two schedules ------------------------------------
+# The watchdog and the health monitor open the same database on their own
+# timers, so both can read PRAGMA table_info before either writes.
+
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    db = watchdog.open_db(Path(temp) / "state.sqlite3")
+    watchdog.add_column(db, "runs", "configured_execution_mode", "TEXT")
+    assert True, "adding a column that already exists must be tolerated"
+    raised = False
+    try:
+        watchdog.add_column(db, "runs", "nonsense", "NOT A TYPE (")
+    except sqlite3.OperationalError:
+        raised = True
+    assert raised, "an error that is not a duplicate column must still be raised"
+    db.close(); gc.collect()
 
 print("watchdog storage smoke test: OK")

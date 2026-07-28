@@ -36,7 +36,12 @@ if ($InstallDependencies) {
   & py -3.11 -m venv $runtimePath
   $pythonPath = Join-Path $runtimePath 'Scripts\python.exe'
   if (-not (Test-Path -LiteralPath $pythonPath)) { throw "The environment was not created at $runtimePath." }
-  & $pythonPath -m pip install --upgrade pip
+  # NOT `pip install --upgrade pip` first. That fetched an unpinned, unhashed
+  # distribution from the network and then used it to enforce the hash checking
+  # below, putting the tool that verifies the supply chain outside the supply
+  # chain it verifies. The interpreter's bundled pip has supported
+  # --require-hashes for years; if it ever needs upgrading, pin it in
+  # requirements.in so it arrives hashed like everything else.
   # --require-hashes makes pip refuse the whole file unless every distribution
   # matches a recorded hash, so a compromised or substituted artefact fails the
   # install instead of reaching an unattended job that can restart a router.
@@ -61,7 +66,11 @@ if ($RegisterTask) {
   if ($taskXml.Task.Principals.Principal.LogonType -ne 'InteractiveToken') { throw 'The registered task is not configured for the interactive Windows user.' }
   if ($taskXml.Task.Actions.Exec.Command -ne 'wscript.exe') { throw 'The registered task does not run through the silent VBS wrapper.' }
   if ($EnableExecution) { Write-Warning 'The task now passes --execute. Router restart remains gated by config.local.json execution_mode.' }
-  else { Write-Host 'The silent five-minute task is registered. It remains dry-run until separately activated.' }
+  else {
+    Write-Host 'The silent five-minute task is registered. It remains dry-run until separately activated.'
+    Write-Host 'This is also how gate 1 is closed again: re-running -RegisterTask without'
+    Write-Host '-EnableExecution replaces the task with one that carries no --execute.'
+  }
 }
 
 if ($RegisterHealthTask) {

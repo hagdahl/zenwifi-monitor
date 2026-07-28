@@ -38,6 +38,31 @@ NOTICE_COOLDOWN_MINUTES = 60
 FAILURE_WINDOW_MINUTES = 30
 REQUIRED_FAILED_RUNS = 3
 
+# How many restarts the monitor may decide on before it stops trying. An outage
+# upstream of the router looks exactly like an outage the router causes, and a
+# restart cannot fix it, so without a bound the monitor restarts the router once
+# per cooldown for as long as the operator's fault lasts. Three attempts inside
+# six hours is the agreed limit: six hours is long enough that several genuinely
+# separate outages in a day are each treated on their own, and three is more
+# than enough for the fault a restart can actually fix.
+#
+# The count is taken over restarts since the last successful run, so connectivity
+# returning clears it. That is what makes the bound about one episode rather than
+# about the clock.
+MAX_RESTARTS_PER_WINDOW = 3
+RESTART_WINDOW_HOURS = 6
+
+# Floors for the two thresholds the restart decision reads. A one-minute
+# threshold with a one-minute cooldown passed validation and would restart the
+# router on almost every run. Five minutes is one probe interval: below that the
+# value cannot describe an observation the monitor is capable of making.
+MIN_THRESHOLD_MINUTES = 5
+
+# An upper bound on the lease as well as a lower one. The lease is honoured
+# until it expires, so a hand-edited value of ten thousand would stop monitoring
+# for a week the first time a run was killed.
+MAX_RUN_LEASE_MINUTES = 60
+
 
 def positive_int(value, fallback: int) -> int:
     """Read a threshold defensively.

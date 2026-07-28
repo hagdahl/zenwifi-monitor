@@ -17,6 +17,7 @@ restart execution. Every mode is a dry run unless `--apply` is given, and
 on a router is a decision for a person, not for a migration.
 """
 import argparse
+import hashlib
 import json
 import shutil
 import socket
@@ -175,12 +176,17 @@ def ask(prompt: str) -> str:
 def probe_tls(host: str, port: int, timeout: float = 10.0) -> dict | None:
     """Complete a TLS handshake and describe the peer, or return None.
 
-    The certificate is deliberately NOT validated: a home router almost always
-    presents a self-signed certificate, and refusing it would push every
-    operator towards plain HTTP, which is the outcome this check exists to
-    prevent. What the handshake proves is that the transport is encrypted; what
-    the reported subject lets the operator do is decide whether to trust it.
-    This mirrors scripts/Setup-RouterConfig.ps1 on Windows.
+    The certificate is deliberately NOT validated, and nothing here should be
+    read as saying otherwise. A home router almost always presents a self-signed
+    certificate, and refusing it would push every operator towards plain HTTP,
+    which is the outcome this check exists to prevent. What the handshake proves
+    is that the transport is encrypted, and nothing more: an interceptor between
+    this host and the router would complete it just as happily.
+
+    What makes that gap closable is the fingerprint. It is recorded in the
+    configuration at `--init` and compared before every restart, so a certificate
+    that changes is at least visible — trust on first use rather than no trust
+    at all. This mirrors scripts/Setup-RouterConfig.ps1 on Windows.
     """
     context = ssl.create_default_context()
     context.check_hostname = False
@@ -189,9 +195,11 @@ def probe_tls(host: str, port: int, timeout: float = 10.0) -> dict | None:
         with socket.create_connection((host, port), timeout=timeout) as raw:
             with context.wrap_socket(raw, server_hostname=host) as secure:
                 certificate = secure.getpeercert(binary_form=False) or {}
+                der = secure.getpeercert(binary_form=True)
                 return {"protocol": secure.version(),
                         "cipher": (secure.cipher() or ("", "", 0))[0],
-                        "subject": str(certificate.get("subject", "not presented"))}
+                        "subject": str(certificate.get("subject", "not presented")),
+                        "fingerprint_sha256": hashlib.sha256(der).hexdigest() if der else ""}
     except (OSError, ssl.SSLError, ValueError):
         return None
 
@@ -225,11 +233,15 @@ def initialise(args) -> int:
         return 2
 
     result = PROBE_TLS(host, port)
-    print(f"TLS available at {host}:{port} (certificate not validated): {bool(result)}")
+    print(f"TLS available at {host}:{port} (certificate NOT validated): {bool(result)}")
     if result:
         print(f"  negotiated protocol: {result['protocol']}")
         print(f"  cipher: {result['cipher']}")
         print(f"  certificate subject: {result['subject']}")
+        print(f"  certificate SHA-256: {result.get('fingerprint_sha256', '')}")
+        print("  This fingerprint is recorded and compared before every restart. "
+              "Nothing verified the certificate itself; a change is what you will "
+              "be told about.")
 
     use_tls = True
     if not result:
@@ -237,8 +249,10 @@ def initialise(args) -> int:
               f"HTTP as a convenience. Enable or repair HTTPS in the router's "
               f"administration interface and run this again.", file=sys.stderr)
         if not args.allow_insecure_http:
-            print("Refusing to write a router configuration without verified TLS. "
-                  "Use --allow-insecure-http only after accepting the risk.", file=sys.stderr)
+            print("Refusing to write a router configuration with no TLS at all. "
+                  "Nothing here verifies a certificate — an encrypted transport is "
+                  "the bar, and it was not met. Use --allow-insecure-http only "
+                  "after accepting the risk.", file=sys.stderr)
             return 1
         # An explicit flag is not enough. Typing the sentence is the point: it
         # makes an unencrypted credential path a deliberate act rather than a
@@ -251,11 +265,25 @@ def initialise(args) -> int:
               "have no transport protection.", file=sys.stderr)
         use_tls = False
 
+    router = {"host": host, "management_port": port, "use_tls": use_tls, "model": model}
+    fingerprint = result.get("fingerprint_sha256", "") if result else ""
+    if use_tls and fingerprint:
+        # Trust on first use. Recorded now so a later change is visible; the
+        # monitor warns rather than refuses, because a self-signed certificate
+        # being renewed must not silence monitoring. The key is written only
+        # when there is a real value: an empty string would be a placeholder,
+        # and the monitor's own validator rejects those. Absent means "not
+        # recorded yet", and the first run that reaches the router records it.
+        router["tls_fingerprint_sha256"] = fingerprint
+    else:
+        # The monitor refuses a plain-HTTP configuration unless this is present,
+        # so the typed confirmation guards every later run and not only this one.
+        router["insecure_http_acknowledged"] = True
+
     config = {
         "config_version": project_version(),
         "paths": {"log_directory": logs, "state_database": state},
-        "router": {"host": host, "management_port": port, "use_tls": use_tls,
-                   "model": model},
+        "router": router,
         "monitor": dict(example["monitor"]),
         # Empty rather than the template's "<Notion data source ID>". A written
         # configuration should contain no placeholder text at all: a value in
@@ -286,6 +314,62 @@ def initialise(args) -> int:
     print(f"Wrote {target}.")
     print("Store credentials next, then soak in dry-run before enabling execution.")
     return validate(target)
+
+
+def accept_router_certificate(args) -> int:
+    """Record the certificate the router is presenting now.
+
+    This is the deliberate half of trust on first use. The monitor reports a
+    changed certificate and keeps working; resolving the report means a person
+    deciding the new one is legitimate, and this writes that decision down. It
+    contacts the router and nothing else — no credential is read and no
+    execution mode is touched.
+    """
+    target = args.config or default_config_path()
+    if not target.exists():
+        print(f"{target} does not exist.", file=sys.stderr)
+        return 2
+    config = load_json(target)
+    router = config.get("router")
+    if not isinstance(router, dict) or not router.get("host"):
+        print("The configuration has no router host.", file=sys.stderr)
+        return 2
+    if not router.get("use_tls", True):
+        print("This configuration uses plain HTTP by explicit acknowledgement, so "
+              "there is no certificate to record.", file=sys.stderr)
+        return 2
+    port = router.get("management_port", router.get("https_port", 8443))
+    result = PROBE_TLS(router["host"], port)
+    if not result:
+        print(f"No TLS handshake at the configured router and port. Nothing was "
+              f"changed.", file=sys.stderr)
+        return 1
+    previous = router.get("tls_fingerprint_sha256")
+    fingerprint = result.get("fingerprint_sha256", "")
+    print(f"  negotiated protocol: {result['protocol']}")
+    print(f"  certificate subject: {result['subject']}")
+    print(f"  certificate SHA-256: {fingerprint}")
+    if previous and previous != fingerprint:
+        print(f"  replaces: {previous}")
+    print("Nothing verified this certificate. Recording it means you have decided "
+          "it is the router's.")
+    if not args.apply:
+        print(f"Dry run. {target} was not changed. Re-run with --apply to record it.")
+        return 0
+    router["tls_fingerprint_sha256"] = fingerprint
+    target.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    print(f"Recorded in {target}.")
+    print("The stored comparison value in the database is refreshed by the next "
+          "monitoring run that reaches the router.")
+    return 0
+
+
+def default_config_path() -> Path:
+    project_local = ROOT / "config.local.json"
+    system_wide = Path("/etc/zenwifi-monitor/config.json")
+    if project_local.exists() or not system_wide.exists():
+        return project_local
+    return system_wide
 
 
 # Substituted by the suite so the TLS posture can be exercised without a
@@ -319,6 +403,10 @@ def main() -> int:
                         help="Print the default gateway as a candidate for router.host.")
     parser.add_argument("--enable-notion", action="store_true",
                         help="Turn optional Notion logging on. Never implied.")
+    parser.add_argument("--accept-router-certificate", action="store_true",
+                        dest="accept_certificate",
+                        help="Record the certificate the router is presenting now, "
+                             "resolving a reported change. Contacts the router only.")
     parser.add_argument("--apply", action="store_true",
                         help="Write the result. Without it nothing on disk changes.")
     args = parser.parse_args()
@@ -327,8 +415,11 @@ def main() -> int:
         return discover_gateway()
     if args.init:
         return initialise(args)
+    if args.accept_certificate:
+        return accept_router_certificate(args)
     if not args.migrate and not args.validate:
-        parser.error("Choose --init, --migrate, --validate or --discover-gateway.")
+        parser.error("Choose --init, --migrate, --validate, --discover-gateway or "
+                     "--accept-router-certificate.")
 
     config_path = args.config
     if config_path is None:

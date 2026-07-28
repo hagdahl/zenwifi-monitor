@@ -518,6 +518,83 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
            exits == [1, 1, 1, 1, 1], str(exits))
     gc.collect()
 
+# --- the observer must survive its own inputs --------------------------------
+# One malformed timestamp in `runs` or `events` raised ValueError out of
+# evaluate(), which killed the health monitor permanently and silently: the
+# thing that reports when the watchdog stops, stopped, and nothing was left to
+# notice. The lease already hardens against exactly this input.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp)
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+    database = root / "state.sqlite3"
+    db = watchdog.open_db(database)
+    watchdog.log_run(db, True, "dry-run", "dry-run")
+    db.execute("UPDATE runs SET timestamp_utc='not a timestamp'")
+    watchdog.log_event(db, "Offline", "Monitoring started", "x")
+    db.execute("UPDATE events SET timestamp_utc='also not a timestamp'")
+    db.commit(); db.close(); gc.collect()
+
+    cfg = {"paths": {"state_database": str(database), "log_directory": str(root)},
+           "health": {"run_age_minutes": 15, "outbox_age_minutes": 180},
+           "notion": {"enabled": True}, "execution_mode": "execute"}
+    db = health.open_db(database)
+    found = health.evaluate(db, cfg)
+    record("a malformed run timestamp is reported, not raised",
+           "unreadable-run" in codes(found), f"codes={codes(found)}")
+    record("and a malformed event timestamp does not stop the evaluation",
+           "db-unreadable" not in codes(found), f"codes={codes(found)}")
+    db.close(); gc.collect()
+
+# --- the two conditions the watchdog can only report through the database ----
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp)
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+    database = root / "state.sqlite3"
+    db = watchdog.open_db(database)
+    watchdog.log_run(db, True, "dry-run", "dry-run")
+    db.commit(); db.close(); gc.collect()
+
+    cfg = {"paths": {"state_database": str(database), "log_directory": str(root)},
+           "router": {"host": "router.invalid", "use_tls": True},
+           "health": {"run_age_minutes": 15, "outbox_age_minutes": 180},
+           "notion": {"enabled": False}, "execution_mode": "dry-run"}
+    db = health.open_db(database)
+    record("nothing is reported before anything has been observed",
+           health.check_router_certificate(db, cfg) == [])
+
+    health.set_state(db, "router_tls_fingerprint", "a" * 64)
+    health.set_state(db, "router_tls_fingerprint_seen", "a" * 64)
+    db.commit()
+    record("a matching certificate is not a finding",
+           health.check_router_certificate(db, cfg) == [])
+
+    health.set_state(db, "router_tls_fingerprint_seen", "b" * 64)
+    db.commit()
+    record("a changed certificate is reported",
+           codes(health.check_router_certificate(db, cfg)) == ["router-certificate-changed"])
+    record("and the report names the command that resolves it",
+           "--accept-router-certificate" in messages(health.check_router_certificate(db, cfg)))
+
+    # A configured value outranks the recorded one, so accepting the new
+    # certificate in the configuration clears the finding.
+    accepted = dict(cfg)
+    accepted["router"] = {**cfg["router"], "tls_fingerprint_sha256": "b" * 64}
+    record("recording the new certificate clears the finding",
+           health.check_router_certificate(db, accepted) == [])
+
+    # One skip is ordinary. Repeated skips mean a lease is being leaked, and the
+    # only other symptom is an absence of runs — which the stale-run check
+    # cannot see, because the lease holder's own run row is recent.
+    record("one skipped run is not a finding", health.check_run_lease(db) == [])
+    health.set_state(db, "consecutive_skipped_runs", "3"); db.commit()
+    record("repeated skipped runs are reported",
+           codes(health.check_run_lease(db)) == ["runs-skipped"])
+    health.set_state(db, "consecutive_skipped_runs", "0"); db.commit()
+    record("and a run that proceeds clears it", health.check_run_lease(db) == [])
+    db.close(); gc.collect()
+
 # The health monitor's own top-level handler, exercised as a process because
 # that is the only place it runs. An unwritable bootstrap log must not raise
 # from inside the handler: doing so replaces the error that actually stopped

@@ -47,22 +47,36 @@ readable by the service group only. It then enables both timers.
 
 Edit `/etc/zenwifi-monitor/config.json` before going further. The paths in it
 must point at the state and log directories the installer created. To write one
-from scratch instead of editing the template:
+from scratch instead of editing the template, move the template aside first:
+`--init` never overwrites a configuration, and the installer has already put one
+there, so running it against that path refuses.
 
 ```
-python3 /opt/zenwifi-monitor/scripts/configure.py --config /etc/zenwifi-monitor/config.json \
-    --init --router-host 10.0.0.1 --router-model 'ZenWiFi XT8' \
+sudo mv /etc/zenwifi-monitor/config.json /etc/zenwifi-monitor/config.json.template
+sudo python3 /opt/zenwifi-monitor/scripts/configure.py \
+    --config /etc/zenwifi-monitor/config.json \
+    --init --router-host 192.0.2.1 --router-model 'ZenWiFi XT8' \
     --state-database /var/lib/zenwifi-monitor/watchdog.sqlite3 \
     --log-directory /var/log/zenwifi-monitor
+sudo chown root:zenwifi /etc/zenwifi-monitor/config.json
+sudo chmod 0640 /etc/zenwifi-monitor/config.json
 ```
+
+The router address above is a documentation placeholder, not a default.
 
 Without `--apply` it only reports. It completes a TLS handshake against the
 router first and refuses to write without one; the certificate is not
 validated, because a home router's is self-signed and rejecting that would push
 you towards plain HTTP, which is what the check exists to prevent. The peer's
-subject is printed so you can decide whether to trust it. A configuration
-written this way is always `execution_mode: dry-run` with Notion off, and
-`--init` never overwrites an existing file.
+subject and the certificate's SHA-256 fingerprint are printed so you can decide
+whether to trust it, and the fingerprint is recorded. Every later run compares
+against it: a change is reported as a `Warning` event and as a health finding,
+and the run continues, because a renewed self-signed certificate must not
+silence monitoring. When you have confirmed the new certificate is the
+router's, run `configure.py --accept-router-certificate --apply` to record it.
+
+A configuration written this way is always `execution_mode: dry-run` with Notion
+off, and `--init` never overwrites an existing file.
 
 Two helpers, both standard-library only so they work before the environment
 exists, and both dry runs unless told otherwise:
@@ -117,6 +131,26 @@ writes a drop-in that adds `--execute` to the unit. That is gate one. Gate two
 is `"execution_mode": "execute"` in `/etc/zenwifi-monitor/config.json`. With
 either one unset the monitor observes and records but never touches the router,
 however often the timer fires.
+
+Gate one is closable again:
+
+```
+sudo ./deploy/debian/install.sh --disable-execution
+```
+
+That removes the drop-in and reloads systemd. It does not touch the
+configuration, so gate two stays exactly as you left it. Re-running `--install`
+over a system whose gate one is open leaves it open — reinstalling is not a
+request to change the activation state — and says so rather than reporting that
+execution is off.
+
+However many times a restart is decided, the monitor stops after
+`monitor.max_restarts_per_window` of them within `monitor.restart_window_hours`,
+counted since connectivity was last seen. The default is three in six hours. An
+outage upstream of the router looks exactly like one the router causes, and a
+restart cannot fix it; without the bound the router would be restarted once per
+cooldown for as long as the operator's fault lasted. Connectivity returning
+clears the count, so the limit is about one episode rather than about the clock.
 
 Leave both off for a soak first. A dry-run install records exactly what a
 production install would do, so you can read a week of history before granting

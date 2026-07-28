@@ -68,7 +68,7 @@ Open PowerShell in the project root and run these scripts under the same Windows
 
 Public GitHub release uses the history-free `_public` staging process in [01_docs/PUBLICATION.md](01_docs/PUBLICATION.md). Never push this source repository's local Git history.
 
-The planned reliability and Debian support work is tracked in [01_docs/IMPROVEMENT_PLAN.md](01_docs/IMPROVEMENT_PLAN.md).
+Debian is supported: `deploy/debian/` carries `systemd` units, timers and an installer, described in [01_docs/DEBIAN.md](01_docs/DEBIAN.md). No timer has yet fired on a real Debian host, which is stated there rather than implied. Remaining reliability work is tracked in [01_docs/IMPROVEMENT_PLAN.md](01_docs/IMPROVEMENT_PLAN.md).
 
 Before public release, use [01_docs/INDEPENDENT_REVIEW_PROMPT.md](01_docs/INDEPENDENT_REVIEW_PROMPT.md) with an independent reviewer and bind the review to the intended commit.
 

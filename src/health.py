@@ -89,11 +89,32 @@ def write_notification_stamp(state: str, severity: int, codes: list[str],
         return False
 
 
+def parse_utc(value):
+    """Read a stored timestamp, or None when it is not one.
+
+    The health monitor is the thing that reports when the watchdog has stopped,
+    so it must survive the database rather than die on it. One malformed row in
+    `runs` or `events` used to raise ValueError out of `evaluate`, which killed
+    the observer permanently and silently: the health task exited non-zero every
+    fifteen minutes and nothing was left to notice that nothing was noticing.
+    The run lease already hardens against exactly this input; this is the same
+    reasoning applied to the observer.
+    """
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def check_recent_run(db, threshold_minutes: int) -> list[tuple[str, str]]:
     row = db.execute("SELECT timestamp_utc FROM runs ORDER BY id DESC LIMIT 1").fetchone()
     if row is None:
         return [("no-runs", "The runs table holds no monitoring run at all.")]
-    age = utc_now() - datetime.fromisoformat(row[0])
+    recorded = parse_utc(row[0])
+    if recorded is None:
+        return [("unreadable-run", "The newest monitoring run carries a timestamp that "
+                                   "cannot be read, so its age is unknown.")]
+    age = utc_now() - recorded
     if age > timedelta(minutes=threshold_minutes):
         return [("stale-run", f"The newest monitoring run is {int(age.total_seconds() // 60)} minutes old; "
                               f"the threshold is {threshold_minutes}.")]
@@ -112,8 +133,9 @@ def check_outbox(db, age_minutes: int, max_attempts: int,
     findings = []
     row = db.execute("SELECT COUNT(*), MIN(timestamp_utc) FROM events "
                      "WHERE delivered_to_notion=0 AND delivery_attempts < ?", (max_attempts,)).fetchone()
-    if delivery_configured and row and row[0]:
-        age = utc_now() - datetime.fromisoformat(row[1])
+    oldest = parse_utc(row[1]) if row and row[0] else None
+    if delivery_configured and row and row[0] and oldest is not None:
+        age = utc_now() - oldest
         if age > timedelta(minutes=age_minutes):
             findings.append(("outbox-stalled", f"{row[0]} deliverable events have waited undelivered for "
                                                f"{int(age.total_seconds() // 60)} minutes."))
@@ -125,6 +147,45 @@ def check_outbox(db, age_minutes: int, max_attempts: int,
                          f"{exhausted} events exhausted their delivery retries. Fix the remote destination, "
                          "then run the watchdog once with --reset-outbox-attempts."))
     return findings
+
+
+def check_router_certificate(db, cfg: dict) -> list[tuple[str, str]]:
+    """Report a router certificate that no longer matches the recorded one.
+
+    The comparison itself is the watchdog's: this monitor cannot open a socket
+    at all on Debian, where its unit restricts address families to AF_UNIX. It
+    reads what the watchdog recorded, which is the right division — the observer
+    stays an observer, and still says something an operator can act on.
+    """
+    router = cfg.get("router", {}) if isinstance(cfg.get("router"), dict) else {}
+    expected = router.get("tls_fingerprint_sha256") or get_state(db, "router_tls_fingerprint")
+    seen = get_state(db, "router_tls_fingerprint_seen")
+    if expected and seen and expected != seen:
+        return [("router-certificate-changed",
+                 "The router is presenting a different TLS certificate than the one "
+                 "recorded. A renewed self-signed certificate is the ordinary "
+                 "explanation, and nothing here verified either one. Confirm the "
+                 "router, then run configure.py --accept-router-certificate.")]
+    return []
+
+
+def check_run_lease(db, threshold: int = 3) -> list[tuple[str, str]]:
+    """Report runs that keep declining because another run holds the lease.
+
+    One skip is ordinary: it means the previous run was still going. A run that
+    skips every cycle means a lease is being leaked — a process killed by a
+    scheduler timeout releases nothing, and the next runs decline in silence
+    until the bound expires. Without this the only visible symptom is an absence,
+    which is exactly what the stale-run check cannot distinguish from a healthy
+    quiet spell, because the lease-holder's own run row is recent.
+    """
+    skipped = positive_int(get_state(db, "consecutive_skipped_runs"), 0)
+    if skipped >= threshold:
+        return [("runs-skipped",
+                 f"{skipped} consecutive monitoring runs declined to start because "
+                 "another run held the exclusive lease. A run is leaking it, or one "
+                 "is genuinely stuck.")]
+    return []
 
 
 def check_bootstrap_log(db) -> list[tuple[str, str]]:
@@ -153,7 +214,9 @@ def evaluate(db, cfg: dict) -> list[tuple[str, str]]:
         and cfg.get("execution_mode") == "execute"
     findings = []
     for check, arguments in ((check_recent_run, (run_threshold,)),
-                             (check_outbox, (outbox_threshold, max_attempts, delivery_configured))):
+                             (check_outbox, (outbox_threshold, max_attempts, delivery_configured)),
+                             (check_router_certificate, (cfg,)),
+                             (check_run_lease, ())):
         try:
             findings.extend(check(db, *arguments))
         except sqlite3.Error as error:

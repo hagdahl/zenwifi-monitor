@@ -15,6 +15,8 @@
 8. Every relevant event is committed to SQLite first. When Notion is enabled and the run is authorized, the outbox delivers undelivered events oldest first, marks each delivered only after a successful response, and stops on the first failure. SQLite remains the primary log.
 9. A separate fifteen-minute health task inspects run freshness, database readability, the bootstrap error log and the outbox backlog, and raises a persistent notification only when the state becomes unhealthy or escalates.
 
+The health monitor shares a failure mode with the thing it observes, and this is the documented remedy for it rather than an oversight (ADR-021, and F6 of the third review round). It runs on the same host, under the same scheduler, from the same install. That makes it independent of the watchdog's third-party dependencies and of its exit code, which is most of what an observer is for, but not of a fault that stops both from starting at all. That case has happened: one missing interpreter wedged both jobs, and the observer could not report the outage it exists to report. The accepted risk is that a fault below both of them is invisible from inside the machine; detecting it needs something outside the host, which this project deliberately does not have.
+
 ## Repository layout
 
 The layout is adapted from the governing standard's prescribed tree; ADR-015 records the deviation and its reasons.
