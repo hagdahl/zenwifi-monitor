@@ -30,6 +30,7 @@ jobs:
       - run: python -m pip install --require-hashes -r requirements.lock.txt
       - run: python -m pip check
       - run: python 04_tests/test_check_versions.py
+      - run: python 04_tests/test_dependencies.py
       - run: python 04_tests/test_platform.py
       - run: python 04_tests/test_deploy.py
       - run: python 04_tests/test_configure.py
@@ -50,6 +51,7 @@ jobs:
       - run: python -m pip install --require-hashes -r requirements.lock.txt
       - run: python -m pip check
       - run: python 04_tests/test_check_versions.py
+      - run: python 04_tests/test_dependencies.py
       - run: python 04_tests/test_platform.py
       - run: python 04_tests/test_deploy.py
       - run: python 04_tests/test_configure.py

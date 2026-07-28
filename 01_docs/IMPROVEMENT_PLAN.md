@@ -8,7 +8,7 @@ Strengthen reliable local operation, deliver queued Notion events after
 connectivity returns, add local health monitoring, and support both Windows 11
 and Debian Linux without weakening the existing restart safety model.
 
-## 1. Cross-platform operating model - partially delivered
+## 1. Cross-platform operating model - delivered, one gap in evidence
 
 Refactor the monitor into a platform-neutral core and small platform adapters.
 
@@ -22,10 +22,12 @@ dependency is absent. `04_tests/test_platform.py` pins that no other module
 reaches around the seam to a platform primitive, that a notice never raises,
 and that a fallback backend is refused.
 
-Not delivered: the scheduler and credential *deployment* halves of the table
-below. A systemd service, timer and encrypted credentials are part of section
-6, and the POSIX notice path has been exercised only against a substituted
-failing surface, never against a real desktop session.
+Also delivered, in section 6: the scheduler and credential deployment halves
+of the table below. What is still missing is not an artefact but evidence — the
+POSIX notice path has been exercised only against a substituted surface, never
+against a real desktop session, and no timer has fired on a real Debian host.
+That gap is stated in section 6 and in `01_docs/DEBIAN.md`; it closes the first
+time somebody runs this on a Debian machine, not by writing more code.
 
 | Concern | Windows 11 | Debian Linux |
 |---|---|---|
@@ -103,7 +105,7 @@ Replace unbounded bootstrap logging with bounded rotation.
 - Never overwrite the active error record before a replacement exists.
 - Document the Windows and Debian bootstrap-log locations.
 
-## 5. Locked dependencies and CI supply chain - delivered except item 6
+## 5. Locked dependencies and CI supply chain - delivered
 
 1. Introduce a direct-dependency input file. Delivered: `requirements.in`.
 2. Generate a fully resolved, hash-locked requirements file for supported
@@ -122,9 +124,21 @@ Replace unbounded bootstrap logging with bounded rotation.
    passed on Linux unchanged. The exclusion removed real coverage for no
    reason and has been withdrawn.
 6. Add a scheduled dependency-review workflow; upgrades remain deliberate pull
-   requests with regenerated hashes and tests. Not started.
+   requests with regenerated hashes and tests. Delivered:
+   `scripts/check_dependencies.py` asks PyPI whether any direct dependency has a
+   newer release and OSV whether any pinned version, direct or transitive, is
+   known to be affected by anything. It changes nothing — deliberately, because
+   an upgrade means regenerating the lock with `--generate-hashes` and running
+   both platforms' suites, and a bot that opened pull requests would either
+   bypass that or guess at it. `.github/workflows/dependency-review.yml` runs it
+   weekly and opens or updates one tracking issue; its only write permission is
+   `issues: write`. A service that could not be reached is reported as an
+   unanswered question rather than a clean result, because from here an
+   unreachable vulnerability database looks exactly like an empty one. Covered
+   offline by `04_tests/test_dependencies.py`, which substitutes the single
+   request seam so no suite ever reaches the network.
 
-## 6. Debian deployment path - partially delivered
+## 6. Debian deployment path - delivered, unverified on real hardware
 
 Delivered: `deploy/debian/` carries the two services, the two timers and an
 installer that creates the service account, the environment from the
@@ -194,7 +208,13 @@ Do not force an outage or restart solely for this verification.
 - Publish from `_public` only after Windows and Debian tests pass and
   public-release scanning is clean.
 
-## 9. Outstanding review findings
+## 9. Review findings
+
+Every finding from every round is closed except F6, which the project owner
+accepted rather than engineered away, and which only an observer outside this
+host would close. What remains open in this plan is section 7 and the evidence
+gaps named in sections 1 and 6: nothing here has run under a real `systemd`, and
+the first real outage has not happened yet.
 
 Raised by the third independent review round against `fb6b4a3..f51212b` and
 carried forward deliberately. Identifiers are the review's own. Each item names
@@ -288,7 +308,7 @@ failure into an otherwise healthy system.
   rejected whitelist values. Both registered tasks pass only accepted arguments,
   so neither live job is affected.
 
-### F6. The health monitor shares the launcher's fate (medium)
+### F6. The health monitor shares the launcher's fate (medium) - accepted, not fixed
 
 Found in operation on 2026-07-27, not by review. The health monitor exists to
 report faults the watchdog cannot report about itself, and it is registered
@@ -324,7 +344,7 @@ the limitation travels with the code rather than living in a chat transcript.
 An observer outside the host remains the only thing that would close it, and
 the only thing that would also notice the machine being off.
 
-### Fourth review round (F7 to F17) - open
+### Fourth review round (F7 to F17) - closed
 
 Raised against `178adf4` by five independent reviewers, each with one lens and
 none with knowledge of the implementation reasoning. The full report, including
@@ -437,6 +457,45 @@ be closed:
 The owner has been informed of F7 and has chosen to leave production execution
 enabled pending the fix. That acceptance is recorded in the report.
 
+### Fifth review round - closed
+
+Raised against the published commit `b285abe` by one independent agent, given
+the four commits and the code and nothing about the reasoning behind them, and
+required to try to refute each finding before reporting it and to say which
+findings it had confirmed by executing something. The full report is
+`01_docs/REVIEW_b285abe.md`.
+
+It upheld F13, F11 and F14, and **did not uphold F15**: the installer test ran
+`--enable-execution` before it looked, so an installer that opened activation
+gate 1 during a plain `--install` passed all eighty-four checks, which the
+reviewer demonstrated. That was the F15 sub-item the fourth round had named
+verbatim. Three of its fifteen mutations went uncaught, all three in the test
+harness rather than in the product.
+
+- **1 and 2 - closed.** The harness probes after `--install` and again after
+  `--enable-execution`, asserting that a default install leaves no drop-in, no
+  drop-in directory and `dry-run` in the configuration it wrote. The namespace
+  reset now clears the unit files and the drop-in directory too, because an
+  overlay showed a real installation's drop-in through its lower layer and
+  answered for the install under test.
+- **3 - closed.** `find … -exec install … \;` returned zero even when every
+  `install` failed, after `rm -rf "${PREFIX}/src"` had already run: a failed
+  install destroyed working code and went on to enable both timers and report
+  success. One `install` command now carries its own exit status.
+- **4 and 5 - closed.** `00_admin/HANDOVER.md` still described the pre-F11
+  bootstrap-log location, and two documents claimed every F15 pin had been
+  revert-verified when one had not.
+- **6, 7 and 8 - closed.** The installed-module list is compared against the
+  whole module tree with the installer's flatness assumption asserted
+  separately; the suite's docstring no longer claims the dependency work is
+  exercised when `pip` is stubbed out; and the installer runs against a copy of
+  the checkout owned by a non-root uid, so the ownership assertions discriminate
+  even when the clone is root-owned.
+
+The lesson, recorded because it generalises: a test that arranges the world into
+its final state before observing it cannot see the intermediate state, and the
+intermediate state is often the safety property.
+
 ### Carried forward from earlier rounds
 
 - A valid launch through the wrapper still discards the child's exit code, and
@@ -453,14 +512,23 @@ enabled pending the fix. That acceptance is recorded in the report.
 
 ## Implementation order
 
-1. Notion outbox, bootstrap rotation, and health monitor. Delivered; the outbox,
-   the rotation bound and `src/health.py` are in place and the health task is
+All five steps are delivered.
+
+1. Notion outbox, bootstrap rotation, and health monitor. The outbox, the
+   rotation bound and `src/health.py` are in place and the health task is
    registered.
-2. Section 9. F1 to F6 are closed except F6's remedy, which is a decision for
-   the owner. The carried-forward items are closed too: overlapping runs are
-   prevented by the run lease, and dependencies are hash-locked.
-3. Platform interfaces and dependency locking. Dependency locking is
-   delivered. The platform seam in section 1 is delivered; what remains of
-   section 1 is the deployment half, which belongs with step 4.
+2. Section 9. Every finding from five review rounds is closed except F6, which
+   the owner accepted with its first remedy. The carried-forward items are
+   closed too: overlapping runs are prevented by the run lease, and dependencies
+   are hash-locked.
+3. Platform interfaces and dependency locking, including the scheduled
+   dependency review that keeps a locked set from ageing unnoticed.
 4. Debian service, timer, credential, notification, and documentation path.
-5. Cross-platform CI and independent pre-publication review.
+5. Cross-platform CI and independent pre-publication review, run five times.
+
+What is left is not implementation. Section 7 waits for a real outage, which
+must not be forced. Sections 1 and 6 wait for a real Debian host: no timer has
+fired on one, the install run substituted `systemctl`, the desktop notification
+path has never met a real session bus, and `pip install --require-hashes` is
+substituted in the installer test, so only CI exercises it. The first install
+should be a soak, in dry-run, read from the journal.
