@@ -324,6 +324,46 @@ the limitation travels with the code rather than living in a chat transcript.
 An observer outside the host remains the only thing that would close it, and
 the only thing that would also notice the machine being off.
 
+### Fourth review round (F7 to F17) - open
+
+Raised against `178adf4` by five independent reviewers, each with one lens and
+none with knowledge of the implementation reasoning. The full report, including
+what was reproduced, what was only read, and what passed, is
+`01_docs/REVIEW_178adf4.md`. Summary of the open items, in the order they should
+be closed:
+
+- **F7 (blocker for production).** The restart decision measures the age of a
+  stored marker, not observed continuous failure, so any gap in monitoring turns
+  a stale marker into a restart on the first failed probe afterwards. Reproduced.
+- **F8 (high).** The outage marker is cleared last in the online branch, after
+  work that can fail, so a partial failure during recovery leaves the restart
+  armed. Reproduced.
+- **F9 (high).** Enabling execution in configuration without the invocation flag
+  makes retention keep every event and the health monitor report a stalled queue
+  for ever. The same class as F1, reached through the other gate. Reproduced.
+- **F10 (high).** An unwritable health log notifies on every run, because the
+  state is persisted before it is set, bypassing the notice cooldown entirely.
+  Introduced by the F4 fix. Reproduced.
+- **F11 (high).** On Debian the bootstrap error log resolves under a home
+  directory the service cannot reach, which loses every pre-database failure and
+  makes one health check dead code.
+- **F12 (high).** The restart-failure message is the only error both persisted
+  and delivered to Notion, and the only one not passed through `sanitize_error`.
+- **F13 (high).** The Debian installer leaves installed code owned by the
+  invoking user.
+- **F14 (high).** The systemd credential directory is accepted on the sole test
+  that it is a directory.
+- **F15 (high).** Several safety pins assert their own fixture. Removing the code
+  that stamps an outage, the code that clears it, or the dry-run cooldown stamp
+  leaves every suite green, and the cooldown test cannot distinguish the cooldown
+  from the failure window.
+- **F16 (medium).** Documentation asserting behaviour the code does not have,
+  including two miscounts in this project's own changelog.
+- **F17 (low).** Smaller items, listed in the report.
+
+The owner has been informed of F7 and has chosen to leave production execution
+enabled pending the fix. That acceptance is recorded in the report.
+
 ### Carried forward from earlier rounds
 
 - A valid launch through the wrapper still discards the child's exit code, and
