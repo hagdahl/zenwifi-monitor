@@ -182,6 +182,9 @@ else:
 # accepts the lock file. Both are covered elsewhere — the first not at all,
 # which is stated above and in the improvement plan.
 
+OVERLAID = ("/etc", "/opt", "/var/lib", "/var/log")
+
+
 def _namespace_prerequisites():
     if os.name != "posix":
         return "not a POSIX host"
@@ -225,8 +228,9 @@ def _run_installer(work: Path, log_directory_mode: int | None = None):
         f"exec {sys.executable} \"$@\"\n", encoding="utf-8")
     for path in stub.iterdir():
         path.chmod(0o755)
-    (work / "upper").mkdir()
-    (work / "workdir").mkdir()
+    for name in OVERLAID:
+        (work / "layers" / name.strip("/").replace("/", "-") / "upper").mkdir(parents=True)
+        (work / "layers" / name.strip("/").replace("/", "-") / "work").mkdir(parents=True)
 
     probe = (
         "import json, os, pwd, stat\n"
@@ -261,12 +265,24 @@ def _run_installer(work: Path, log_directory_mode: int | None = None):
 
     restrict = (f"chmod {log_directory_mode:o} /var/log\n"
                 if log_directory_mode is not None else "")
+    # Overlays rather than tmpfs, including over /opt. A tmpfs there also hides
+    # whatever else the host keeps under /opt — on a GitHub runner that is the
+    # Python toolchain this very test runs, so the installer's interpreter
+    # vanished mid-install. An overlay masks only what the install writes.
+    overlays = "".join(
+        f"mount -t overlay overlay -o lowerdir={name},"
+        f"upperdir={work}/layers/{name.strip('/').replace('/', '-')}/upper,"
+        f"workdir={work}/layers/{name.strip('/').replace('/', '-')}/work {name} "
+        f"|| {{ echo \"could not overlay {name}\" >&2; exit 90; }}\n"
+        for name in OVERLAID)
     driver = (
         "set -eu\n"
-        f"mount -t overlay overlay -o lowerdir=/etc,upperdir={work}/upper,workdir={work}/workdir /etc\n"
-        "mount -t tmpfs tmpfs /opt\n"
-        "mount -t tmpfs tmpfs /var/lib\n"
-        "mount -t tmpfs tmpfs /var/log\n"
+        f"{overlays}"
+        # The overlay shows the host's own directories through, so an existing
+        # installation on the machine running the suite would otherwise be read
+        # as this install's output. Removing them touches the upper layer only.
+        "rm -rf /opt/zenwifi-monitor /etc/zenwifi-monitor "
+        "/var/lib/zenwifi-monitor /var/log/zenwifi-monitor\n"
         # A module left behind by an older version must not survive an upgrade,
         # so plant one and let the report say whether it is still importable.
         "mkdir -p /opt/zenwifi-monitor/src\n"
