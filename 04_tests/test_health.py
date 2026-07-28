@@ -154,10 +154,19 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     run_health()
     record("recovering to fewer conditions does not notify", len(notices) == 2, f"notices={len(notices)}")
 
+    # The memory now lives in two stores and the newer one wins, so an elapsed
+    # cooldown has to be simulated in both. Ageing only the database was enough
+    # before the stamp carried a write time; it silently is not any more, which
+    # is exactly the kind of half-applied fixture the review warned about.
+    elapsed = watchdog.utc_text(watchdog.utc_now() - timedelta(hours=4))
     connection = sqlite3.connect(database)
-    connection.execute("UPDATE state SET value=? WHERE key='health_last_notice_utc'",
-                       (watchdog.utc_text(watchdog.utc_now() - timedelta(hours=4)),))
+    connection.execute("UPDATE state SET value=? WHERE key='health_last_notice_utc'", (elapsed,))
     connection.commit(); connection.close()
+    stamp_path = health.notification_stamp_path()
+    if stamp_path.is_file():
+        stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+        stamp["last_notice_utc"] = elapsed
+        stamp_path.write_text(json.dumps(stamp), encoding="utf-8")
     set_run_age(stale)
     run_health()
     record("with the cooldown elapsed the return is announced", len(notices) == 3, f"notices={len(notices)}")
@@ -353,6 +362,99 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     record("an unwritable health log still notifies", len(notices) == 1, f"notices={len(notices)}")
     record("an unwritable health log names the condition",
            notices and "could not be written" in notices[0], f"detail={notices[:1]}")
+    gc.collect()
+
+# --- F10: a write failure must not bypass the notice cooldown -----------------
+# The state used to be persisted before it was decided, so the stored memory
+# disagreed with the run, every later run saw a fresh transition, and a
+# persistently unwritable surface notified on every firing. On the shipped
+# fifteen-minute timer that is about ninety-six dialogs a day.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp)
+    blocker = root / "not-a-directory"
+    blocker.write_text("a file where a log directory is expected", encoding="utf-8")
+    database = root / "state.sqlite3"
+    config = root / "config.json"
+    config.write_text(json.dumps({
+        "paths": {"log_directory": str(blocker), "state_database": str(database)},
+        "router": {"host": "router.invalid", "model": "m"},
+        "monitor": {"probe_urls": ["https://invalid.example"],
+                    "failure_minutes_before_reboot": 15, "reboot_cooldown_minutes": 30},
+        "notion": {"enabled": False}, "execution_mode": "dry-run",
+        "health": {"run_age_minutes": 15, "outbox_age_minutes": 180,
+                   "notice_cooldown_minutes": 60}}), encoding="utf-8")
+    db = watchdog.open_db(database)
+    db.execute("INSERT INTO runs(timestamp_utc,internet_available,execution_mode,"
+               "configured_execution_mode) VALUES(?,1,'dry-run','dry-run')", (watchdog.utc_text(),))
+    db.commit(); db.close(); gc.collect()
+
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+    storm = []
+    health.launch_health_notice = lambda detail: storm.append(detail)
+    log_exits = []
+    for _ in range(5):
+        old_argv = sys.argv
+        try:
+            sys.argv = ["health.py", "--config", str(config)]
+            log_exits.append(health.main())
+        finally:
+            sys.argv = old_argv
+    record("an unwritable health log notifies once, not once per run",
+           len(storm) == 1, f"notices={len(storm)} across {len(log_exits)} runs")
+    record("and the run still reports unhealthy every time",
+           log_exits == [1, 1, 1, 1, 1], str(log_exits))
+    record("the reported detail is not self-contradictory",
+           "All local health checks passed" not in storm[0], storm[0][:120])
+    gc.collect()
+
+# The harder case: a database that accepts reads but refuses every memory write.
+# Without a way to tell which memory is newer, the stale database view would be
+# handed to every run and the storm would return one firing later.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp)
+    database = root / "state.sqlite3"
+    config = root / "config.json"
+    config.write_text(json.dumps({
+        "paths": {"log_directory": str(root), "state_database": str(database)},
+        "router": {"host": "router.invalid", "model": "m"},
+        "monitor": {"probe_urls": ["https://invalid.example"],
+                    "failure_minutes_before_reboot": 15, "reboot_cooldown_minutes": 30},
+        "notion": {"enabled": False}, "execution_mode": "dry-run",
+        "health": {"run_age_minutes": 15, "outbox_age_minutes": 180,
+                   "notice_cooldown_minutes": 60}}), encoding="utf-8")
+    db = watchdog.open_db(database)
+    db.execute("INSERT INTO runs(timestamp_utc,internet_available,execution_mode,"
+               "configured_execution_mode) VALUES(?,1,'dry-run','dry-run')", (watchdog.utc_text(),))
+    db.commit(); db.close(); gc.collect()
+
+    health.bootstrap_log_path = lambda: root / "bootstrap-errors.log"
+    health.notification_stamp_path = lambda: root / "health-notified.txt"
+    refused = []
+    health.launch_health_notice = lambda detail: refused.append(detail)
+    writable_set_state = health.set_state
+
+    def refuse_health_writes(connection, key, value):
+        if key.startswith("health_"):
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        return writable_set_state(connection, key, value)
+
+    health.set_state = refuse_health_writes
+    try:
+        exits = []
+        for _ in range(5):
+            old_argv = sys.argv
+            try:
+                sys.argv = ["health.py", "--config", str(config)]
+                exits.append(health.main())
+            finally:
+                sys.argv = old_argv
+    finally:
+        health.set_state = writable_set_state
+    record("a database that refuses memory writes still notifies only once",
+           len(refused) == 1, f"notices={len(refused)} across {len(exits)} runs")
+    record("and it is reported as a fault rather than passed over",
+           exits == [1, 1, 1, 1, 1], str(exits))
     gc.collect()
 
 print(json.dumps({"suite": "health", "checks": len(results), "failures": 0,

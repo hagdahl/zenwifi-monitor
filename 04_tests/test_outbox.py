@@ -100,16 +100,25 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     record("a fresh deliverable event survives retention", remaining == [fresh],
            f"remaining ids={remaining}, fresh={fresh}")
 
-    # With no remote destination an event can never be delivered, so retention
-    # must reclaim it or the table grows for ever in a supported configuration.
+    # The retention window is an ABSOLUTE bound on an event's age, whatever the
+    # reason it is still here. The previous rule kept a never-attempted event
+    # while the configuration merely claimed a destination, which let an install
+    # with execution enabled in configuration but not in its invocation
+    # accumulate events for ever and report a stalled queue permanently. The
+    # bound must therefore hold with the readiness flag either way.
     db.execute("UPDATE events SET timestamp_utc=?", (aged,)); db.commit()
-    kept = watchdog.purge_events(db, 30, 3, delivery_configured=True)
+    dropped = watchdog.purge_events(db, 30, 3, delivery_configured=True)
     still = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    record("a never-attempted event is kept while delivery is configured", still == 1,
-           f"purged={kept} remaining={still}")
+    record("retention reclaims an aged undelivered event even when a destination is configured",
+           dropped["abandoned"] == 1 and still == 0, f"purged={dropped} remaining={still}")
+    record("the loss is counted so the caller can record it",
+           dropped["undelivered"] == 1, f"purged={dropped}")
+
+    db.execute("INSERT INTO events(timestamp_utc,status,action,detail) VALUES(?,?,?,?)",
+               (aged, "Offline", "aged", "d")); db.commit()
     dropped = watchdog.purge_events(db, 30, 3, delivery_configured=False)
     still = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    record("retention reclaims it once delivery can never happen",
+    record("and reclaims it when no destination is configured either",
            dropped["abandoned"] == 1 and still == 0, f"purged={dropped} remaining={still}")
 
     # Delivery readiness needs both flags, so a dry-run soak with Notion enabled
@@ -205,11 +214,17 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
 
     code = run_main()
     db = watchdog.open_db(database)
-    remaining = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    # The aged event is gone; what remains is the retention notice the run
+    # records so the loss is visible rather than silent.
+    remaining = db.execute("SELECT COUNT(*) FROM events WHERE action != 'Outbox retention'").fetchone()[0]
+    retention_notices = db.execute(
+        "SELECT COUNT(*) FROM events WHERE action = 'Outbox retention'").fetchone()[0]
     runs = db.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
     db.close()
     record("a monitoring run purges aged events without any remote destination",
            code == 0 and remaining == 0, f"exit={code} remaining={remaining}")
+    record("dropping an undelivered event is recorded rather than silent",
+           retention_notices == 1, f"retention notices={retention_notices}")
     record("that run still recorded itself", runs == 1, f"runs={runs}")
 
     db = watchdog.open_db(database)
@@ -225,6 +240,39 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
            f"exit={code} attempts={attempts}")
     record("the reset flag exits without recording a monitoring run", runs_after == 1, f"runs={runs_after}")
     gc.collect()
+
+# --- F12: the one error that both persists AND leaves the machine -------------
+# sanitize_error existed but was applied only to a field that is never
+# transmitted. The restart-failure message is the string that deliver_outbox
+# ships to Notion, and it comes from a call constructed with the credentials.
+source = (SRC / "watchdog.py").read_text(encoding="utf-8")
+record("the restart failure is recorded through the sanitizer",
+       'log_event(db, "Error", "Restart failed", sanitize_error(error))' in source,
+       "the raw exception still reaches log_event")
+
+original_get_secret = watchdog.get_secret
+try:
+    watchdog.get_secret = lambda name: {"router_password": "hunter2-not-a-pattern",
+                                        "router_username": "admin",
+                                        "notion_token": "token-value"}.get(name)
+    leaked = watchdog.sanitize_error(RuntimeError(
+        "connect failed for admin:hunter2-not-a-pattern with Bearer abc123 at the gateway"))
+    record("a bearer token is redacted", "abc123" not in leaked, leaked)
+    record("a password with no recognisable shape is redacted too",
+           "hunter2-not-a-pattern" not in leaked, leaked)
+    record("and the username as well", "admin" not in leaked, leaked)
+    record("the description still says what failed",
+           "RuntimeError" in leaked and "connect failed" in leaked, leaked)
+
+    def unreachable(name):
+        raise RuntimeError("the credential store is unavailable")
+
+    watchdog.get_secret = unreachable
+    survived = watchdog.sanitize_error(RuntimeError("something broke"))
+    record("an unreachable store does not stop a failure being recorded",
+           "something broke" in survived, survived)
+finally:
+    watchdog.get_secret = original_get_secret
 
 print(json.dumps({"suite": "outbox", "checks": len(results), "failures": 0,
                   "result": "green", "findings": results}, indent=2))

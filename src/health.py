@@ -80,7 +80,10 @@ def write_notification_stamp(state: str, severity: int, codes: list[str],
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"state": state, "severity": severity, "codes": codes,
                                     "last_notice_utc": last_notice_utc,
-                                    "notified_codes": notified_codes}), encoding="utf-8")
+                                    "notified_codes": notified_codes,
+                                    # Written so a reader can tell which of the
+                                    # two memories is the more recent.
+                                    "written_utc": utc_text()}), encoding="utf-8")
         return True
     except OSError:
         return False
@@ -180,6 +183,68 @@ def launch_health_notice(detail: str) -> None:
     spawn_detached([windowless_interpreter(), __file__, "--notice", "--detail", detail])
 
 
+def newer(candidate, incumbent) -> bool:
+    """True when `candidate` is a later ISO timestamp than `incumbent`."""
+    if not candidate:
+        return False
+    if not incumbent:
+        return True
+    try:
+        return datetime.fromisoformat(candidate) > datetime.fromisoformat(incumbent)
+    except (TypeError, ValueError):
+        return False
+
+
+def summarise(findings):
+    """Turn findings into the state, severity, codes and detail they imply.
+
+    One place, so a condition discovered late cannot be added to `codes` while
+    `severity` and `detail` are left describing the earlier picture.
+    """
+    state = "unhealthy" if findings else "healthy"
+    # Deduplicated, so two findings of the same kind do not read as a change.
+    codes = sorted({code for code, _ in findings})
+    detail = (" ".join(message for _, message in findings) if findings
+              else "All local health checks passed.")
+    return state, len(codes), codes, detail
+
+
+def decide_notice(state, codes, previous_state, previous_codes, notified_codes,
+                  last_notice, cooldown):
+    """Decide whether to raise a notice, and what to remember afterwards.
+
+    Factored out because a write that fails late in the run adds a condition
+    after the first decision has been taken. Re-taking the decision with the
+    new condition is what keeps every fault under the same damping: an earlier
+    revision set `escalating = True` directly for those cases, which bypassed
+    the cooldown entirely and produced a notice on every run for as long as the
+    write kept failing.
+    """
+    appeared = set(codes) - set(previous_codes)
+    # A condition never announced before is worth showing at once. One that has
+    # been announced and is coming back is damped, so an intermittent fault
+    # beside a persistent one cannot raise a dialog on every toggle.
+    novel = appeared - set(notified_codes)
+    returning = appeared & set(notified_codes)
+    if last_notice:
+        try:
+            due = utc_now() - datetime.fromisoformat(last_notice) >= timedelta(minutes=cooldown)
+        except ValueError:
+            due = True
+    else:
+        due = True
+    escalating = state == "unhealthy" and (previous_state == "healthy" or bool(novel)
+                                           or (bool(returning) and due))
+    stamp = utc_text() if escalating else last_notice
+    if state == "healthy":
+        remembered = []
+    elif escalating:
+        remembered = sorted(set(notified_codes) | set(codes))
+    else:
+        remembered = list(notified_codes)
+    return escalating, stamp, remembered
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Report local ZenWiFi Monitor health. Never restarts the router.")
     parser.add_argument("--config", type=Path)
@@ -213,11 +278,7 @@ def main() -> int:
                          f"The local state database could not be opened or read: {type(error).__name__}.")]
             db = None
 
-    state = "unhealthy" if findings else "healthy"
-    severity = len(findings)
-    # Deduplicated, so two findings of the same kind do not read as a change.
-    codes = sorted({code for code, _ in findings})
-    detail = " ".join(message for _, message in findings) if findings else "All local health checks passed."
+    state, severity, codes, detail = summarise(findings)
     health_cfg = cfg.get("health", {}) if isinstance(cfg.get("health"), dict) else {}
     cooldown = positive_int(health_cfg.get("notice_cooldown_minutes"), NOTICE_COOLDOWN_MINUTES)
 
@@ -230,13 +291,23 @@ def main() -> int:
             previous_codes = [code for code in (get_state(db, "health_last_codes") or "").split(",") if code]
             last_notice = get_state(db, "health_last_notice_utc")
             notified_codes = [code for code in (get_state(db, "health_notified_codes") or "").split(",") if code]
+            # The stamp wins when it is newer. A database that accepts reads but
+            # refuses writes would otherwise hand every run the same stale
+            # memory, so every run would see a fresh transition and notify —
+            # the storm this fix exists to prevent, arriving one run later.
+            stamp = read_notification_stamp()
+            if newer(stamp.get("written_utc"), get_state(db, "health_last_written_utc")):
+                previous_state = stamp.get("state") or previous_state
+                previous_codes = stamp.get("codes") or previous_codes
+                last_notice = stamp.get("last_notice_utc") or last_notice
+                notified_codes = stamp.get("notified_codes") or notified_codes
         except sqlite3.Error as error:
             # A lock taken between the open and the write, or a full disk, is a
-            # real fault. It must be announced, not exit the run silently.
-            state = "unhealthy"
-            codes = sorted(set(codes) | {"health-store-unwritable"})
-            severity = len(codes)
-            detail = f"{detail} The health record could not be written: {type(error).__name__}."
+            # real fault. It becomes a finding like any other, so it travels
+            # through the same escalation damping rather than around it.
+            findings = findings + [("health-store-unwritable",
+                                    f"The health record could not be written: {type(error).__name__}.")]
+            state, severity, codes, detail = summarise(findings)
             db = None
     if db is None:
         # Without the database the stamp file is the only memory of the last
@@ -249,29 +320,30 @@ def main() -> int:
 
     # Only a condition that was not already present is an escalation, so
     # recovering from two conditions to one is not announced as a new problem.
-    appeared = set(codes) - set(previous_codes)
-    # A condition never announced before is worth showing at once. One that has
-    # been announced and is coming back is damped, so an intermittent fault
-    # beside a persistent one cannot raise a dialog on every toggle.
-    novel = appeared - set(notified_codes)
-    returning = appeared & set(notified_codes)
-    if last_notice:
-        try:
-            due = utc_now() - datetime.fromisoformat(last_notice) >= timedelta(minutes=cooldown)
-        except ValueError:
-            due = True
-    else:
-        due = True
-    escalating = state == "unhealthy" and (previous_state == "healthy" or bool(novel)
-                                           or (bool(returning) and due))
-    notice_stamp = utc_text() if escalating else last_notice
-    if state == "healthy":
-        notified_codes = []
-    elif escalating:
-        notified_codes = sorted(set(notified_codes) | set(codes))
+    # The health log is written BEFORE the decision, so a directory that cannot
+    # be written becomes a finding like any other and travels through the same
+    # damping. The line carries the state known at this point; the run's own
+    # failure to write it is what the next line records.
+    try:
+        append_log(log_directory / HEALTH_LOG_NAME,
+                   f"{utc_text()} {state} severity={severity} {detail}")
+    except OSError as error:
+        findings = findings + [("health-log-unwritable",
+                                f"The health log could not be written: {type(error).__name__}.")]
+        state, severity, codes, detail = summarise(findings)
 
+    escalating, notice_stamp, notified_codes = decide_notice(
+        state, codes, previous_state, previous_codes, notified_codes, last_notice, cooldown)
+
+    # The memory is written LAST, after every condition is known. Writing it
+    # earlier recorded a state the run then contradicted, so the next run saw a
+    # fresh transition and escalated again — a notice on every run for as long
+    # as the fault lasted, which on a fifteen-minute timer is about ninety-six
+    # dialogs a day. The cooldown was never reached because the comparison it
+    # depends on was against a value that had already been overwritten.
     if db is not None:
         try:
+            set_state(db, "health_last_written_utc", utc_text())
             set_state(db, "health_last_state", state)
             set_state(db, "health_last_codes", ",".join(codes))
             if notice_stamp:
@@ -279,12 +351,17 @@ def main() -> int:
             set_state(db, "health_notified_codes", ",".join(notified_codes))
             db.commit()
         except sqlite3.Error as error:
-            # The findings and the notification decision are already made at
-            # this point, so a write that fails here must not end the run
-            # before the notice. Announce the fault instead of swallowing it.
-            state = "unhealthy"
-            detail = f"{detail} The health state could not be recorded: {type(error).__name__}."
-            escalating = True
+            # A monitor that cannot record its own evidence is faulty, so this
+            # is a finding and the decision is re-taken with it. That is safe
+            # only because the stamp written below is newer than the database
+            # memory and the next run honours whichever is newer; without that
+            # rule a database that refuses writes would escalate on every run.
+            findings = findings + [("health-state-unwritable",
+                                    f"The health state could not be recorded: {type(error).__name__}.")]
+            state, severity, codes, detail = summarise(findings)
+            escalating, notice_stamp, notified_codes = decide_notice(
+                state, codes, previous_state, previous_codes, notified_codes,
+                last_notice, cooldown)
             try:
                 db.close()
             except sqlite3.Error:
@@ -294,17 +371,6 @@ def main() -> int:
         # Without a database and without a stamp there is no memory of the last
         # notification, so say so rather than silently notifying on every run.
         detail = f"{detail} The notification stamp could not be written, so repeat notices are possible."
-
-    try:
-        append_log(log_directory / HEALTH_LOG_NAME, f"{utc_text()} {state} severity={severity} {detail}")
-    except OSError as error:
-        # The notification matters more than the log line, so a log directory
-        # that cannot be written is reported rather than allowed to end the run.
-        # An unattended job that cannot record its own evidence is itself a
-        # fault, so the run reports unhealthy and exits non-zero.
-        state = "unhealthy"
-        detail = f"{detail} The health log could not be written: {type(error).__name__}."
-        escalating = True
     if escalating:
         launch_health_notice(detail)
     if args.as_json:

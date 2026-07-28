@@ -35,9 +35,27 @@ def write_bootstrap_error(error: Exception) -> None:
 
 
 def sanitize_error(error: Exception) -> str:
-    """Describe a failure without ever persisting an authorization header."""
+    """Describe a failure without persisting a credential.
+
+    Two passes, because they catch different things. The pattern removes an
+    authorization header, which has a recognisable shape. The value pass removes
+    the credentials this run actually holds, which do not: a router password can
+    look like anything, so no regular expression can find it. The values are
+    already in memory; reading them again here costs nothing and is the only way
+    to be sure the string that leaves the machine does not contain them.
+    """
     text = f"{type(error).__name__}: {error}"
-    return re.sub(r"(?i)bearer\s+\S+", "Bearer <redacted>", text)[:400]
+    text = re.sub(r"(?i)bearer\s+\S+", "Bearer <redacted>", text)
+    for name in ("router_password", "router_username", "notion_token"):
+        try:
+            value = get_secret(name)
+        except Exception:
+            # The store being unreachable must not stop a failure from being
+            # recorded; it only means this pass cannot help.
+            continue
+        if value and len(value) > 2 and value in text:
+            text = text.replace(value, f"<{name} redacted>")
+    return text[:400]
 
 def load_config(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
@@ -179,25 +197,36 @@ def outbox_settings(cfg: dict) -> tuple[int, int, int]:
 
 
 def purge_events(db, retention_days: int, max_attempts: int, delivery_configured: bool = True) -> dict:
-    """Drop every event past retention that can no longer reach its destination.
+    """Enforce the retention window as an absolute bound on any event's age.
 
-    Three rules, because an event becomes undeliverable in three ways: it was
-    delivered; it exhausted its retry bound; or the installation is not
-    configured to deliver at all. Without the third rule an install that never
-    activated delivery would keep every event it ever wrote, since such events
-    are neither delivered nor ever attempted.
+    The window used to depend on why an event was still here: delivered events
+    were dropped, exhausted ones were dropped, and undelivered ones only when
+    the installation was judged unable to deliver at all. That judgement read
+    the configuration alone, so an install with `execution_mode` set to execute
+    but whose invocation never carried `--execute` — a natural half-step,
+    because the two gates are opened by different commands — delivered nothing,
+    accumulated events that never reached a single attempt, and reported a
+    stalled queue for ever.
+
+    The window is now what it says: no event outlives it, whatever the reason it
+    is still here. That has no dependency on either gate, which is the point.
+    The alternative, judging retention on whether this particular run could
+    deliver, would let a manual dry-run against a production install purge the
+    events the scheduled run was about to send.
+
+    Events dropped without ever being delivered are counted separately and the
+    caller records one aggregated event for them, so the loss is visible rather
+    than silent.
     """
     cutoff = utc_text(utc_now() - timedelta(days=retention_days))
     delivered = db.execute("DELETE FROM events WHERE delivered_to_notion=1 AND timestamp_utc < ?",
                            (cutoff,)).rowcount
-    if delivery_configured:
-        abandoned = db.execute("DELETE FROM events WHERE delivered_to_notion=0 AND delivery_attempts >= ? "
-                               "AND timestamp_utc < ?", (max_attempts, cutoff)).rowcount
-    else:
-        abandoned = db.execute("DELETE FROM events WHERE delivered_to_notion=0 AND timestamp_utc < ?",
-                               (cutoff,)).rowcount
+    undelivered = db.execute("SELECT COUNT(*) FROM events WHERE delivered_to_notion=0 "
+                             "AND timestamp_utc < ?", (cutoff,)).fetchone()[0]
+    abandoned = db.execute("DELETE FROM events WHERE delivered_to_notion=0 AND timestamp_utc < ?",
+                           (cutoff,)).rowcount
     db.commit()
-    return {"delivered": delivered, "abandoned": abandoned}
+    return {"delivered": delivered, "abandoned": abandoned, "undelivered": undelivered}
 
 
 def reset_exhausted_events(db, max_attempts: int) -> int:
@@ -495,7 +524,13 @@ def main() -> int:
         # Retention runs on every monitoring run, not only when remote delivery is
         # enabled, so the local event table cannot grow without bound in dry-run or
         # in an install that never configured Notion.
-        purge_events(db, retention_days, max_attempts, delivery_is_configured(cfg))
+        purged = purge_events(db, retention_days, max_attempts, delivery_is_configured(cfg))
+        if purged["undelivered"]:
+            # Dropping evidence is worth a line of evidence. Aggregated, so a
+            # large purge cannot itself flood the table it just trimmed.
+            log_event(db, "Warning", "Outbox retention",
+                      f"{purged['undelivered']} events passed the {retention_days}-day retention "
+                      f"window without being delivered and were removed.")
         # first_failure_utc is no longer a decision input. It records only
         # whether the start of this outage has already been announced, so a
         # marker left behind by a partial failure can cause at most a duplicate
@@ -533,7 +568,10 @@ def main() -> int:
         try:
             if not asyncio.run(reboot_router(cfg)): raise RuntimeError("The router rejected the restart request.")
         except Exception as error:
-            log_event(db, "Error", "Restart failed", str(error)); return 1
+            # Sanitized: this is the one error that is both persisted AND
+            # delivered to Notion, and it comes from a call constructed with the
+            # router credentials.
+            log_event(db, "Error", "Restart failed", sanitize_error(error)); return 1
         set_state(db, "last_reboot_utc", utc_text()); set_state(db, "pending_recovery_notification", "1"); set_state(db, "first_failure_utc", ""); log_event(db, "Restarted", "Router restarted", outage_description(evidence))
         if notion_is_enabled(cfg):
             deliver_outbox(db, cfg)

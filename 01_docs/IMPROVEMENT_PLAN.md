@@ -344,17 +344,23 @@ be closed:
   is no longer a decision input, so one left behind by a partial failure can
   cause at most a duplicate log line. It is also now cleared before the work
   that can fail, and committed with the recovery event.
-- **F9 (high).** Enabling execution in configuration without the invocation flag
-  makes retention keep every event and the health monitor report a stalled queue
-  for ever. The same class as F1, reached through the other gate. Reproduced.
-- **F10 (high).** An unwritable health log notifies on every run, because the
-  state is persisted before it is set, bypassing the notice cooldown entirely.
-  Introduced by the F4 fix. Reproduced.
+- **F9 - closed.** The retention window is now an absolute bound on an event's
+  age, whatever the reason it is still here, so it has no dependency on either
+  gate. Events dropped without ever being delivered are counted and the run
+  records one aggregated event, so the loss is visible rather than silent.
+- **F10 - closed.** The state is decided before it is persisted, and the memory
+  is written last. A write that fails becomes a finding and the notice decision
+  is re-taken with it, so every fault travels through the same cooldown. Both
+  memories now carry a write time and the newer one wins, which is what stops a
+  database that accepts reads but refuses writes from handing every run the same
+  stale view and escalating for ever.
 - **F11 (high).** On Debian the bootstrap error log resolves under a home
   directory the service cannot reach, which loses every pre-database failure and
   makes one health check dead code.
-- **F12 (high).** The restart-failure message is the only error both persisted
-  and delivered to Notion, and the only one not passed through `sanitize_error`.
+- **F12 - closed.** The restart failure is recorded through the sanitizer, and
+  the sanitizer now redacts the credential values this run holds as well as the
+  authorization header. A router password has no recognisable shape, so pattern
+  matching alone could never have found it.
 - **F13 (high).** The Debian installer leaves installed code owned by the
   invoking user.
 - **F14 (high).** The systemd credential directory is accepted on the sole test
