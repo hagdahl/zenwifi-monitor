@@ -7,8 +7,11 @@ one is written for a reviewer with the repository already in front of it; this
 one is written to be pasted into an agent that starts from nothing and has to
 fetch the code itself.
 
-Replace `<TARGET_COMMIT>` with the exact commit before starting. The current
-published head is `d1ab7c8`.
+Replace `<TARGET_COMMIT>` with the exact commit before starting. The last
+published commit that changed behaviour is `d1ab7c8`; anything after it is
+documentation, so review `d1ab7c8` unless code has landed since. Naming a
+moving head here would be a claim that goes stale the moment this file is
+committed.
 
 Give the reviewer the commit and nothing else. It is not told what the changes
 were meant to achieve, why any decision was taken, or what previous rounds
