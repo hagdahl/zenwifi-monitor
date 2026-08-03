@@ -42,7 +42,7 @@ the owner to pick from, in whatever order he chooses.
 | A-11 | Stop the launcher suite writing to a real path | Defect | — | Proposed, consequence corrected |
 | A-12 | Record the router certificate at a calm moment, not before a restart | Design | — | Proposed |
 | A-13 | Correct the claim that `validate_config` requires `router.model` | Correction | — | Proposed |
-| A-17 | Sweep every suite for pins that cannot fail | Assurance | — | Proposed |
+| A-17 | Sweep every suite for pins that cannot fail | Assurance | — | **Done 3 Aug — 5 gaps found and closed** |
 | A-18 | Gate the structure of the decision log | Correction | — | Proposed |
 
 ## A-01. Sixth independent review — done 3 August
@@ -251,26 +251,38 @@ or give the wrapper a documented way to be told where to write and use it from
 the test. Then say in the docstring which real surfaces the suite touches, if
 any remain.
 
-## A-17. Sweep every suite for pins that cannot fail
+## A-17. Sweep every suite for pins that cannot fail — done 3 August
 
-**Why.** ADR-026 says a pin is not accepted until the behaviour has been
-reverted and the test observed to fail. That rule has been applied to every
-change made since it was written, and to nothing written before it. The sixth
-round demonstrated the gap in one line: it mutated the failed-run query to the
-correct form and all nine suites stayed green. The rule was already in the
-decision log while the code it was meant to protect was unprotected.
+**Result: 64 of 66 reversions caught; 5 pins did not exist before and now do.**
+The full record is `01_docs/PIN_SWEEP_A17.md`, with every row executed rather
+than reasoned about.
 
-**What.** Take each safety-relevant behaviour the suites claim to hold — the two
-activation gates, the delivery gate, the lease, the outbox bounds, the health
-findings, the installer's ownership and modes, the launcher's allowlist — revert
-each one in a scratch copy and record which suite fails. Anything that survives
-its own reversion is a finding, not a chore.
+**The five gaps.** The router's identity check was never checked to be *called* —
+thorough coverage as a function, nothing asserting it was on the restart path,
+which is the same shape as F18. A secret could have come from the environment,
+which `src/_secrets.py` opens by ruling out: the systemd path was covered and the
+keyring path, where such a fallback would sit, was not. A changed bootstrap error
+log was never reported — the stamp was written and never compared, and this is
+the check A-10 spent a week vindicating. The run that announces an outage could
+also decide on it. And two concurrent runs could both take the lease, because
+every case took it from one process at a time, which is not what a lease is for.
 
-**Effort.** Longer than it sounds, and the only honest way to know what the
-suites are worth. Roughly forty behaviours.
+**Two survivors, neither a missing pin.** `BEGIN IMMEDIATE` reduced to `BEGIN`
+changes no observable outcome under the current pragmas — SQLite refuses a
+deferred read-to-write upgrade outright rather than waiting — so the honest
+record is that the line is unpinned and why, not a source-text check pretending
+otherwise. The launcher allowlist survives on Linux only because that half of
+the suite is skipped there; swept separately on Windows, it is caught at once.
 
-**Done when.** A table exists of behaviour, reversion, and the assertion that
-caught it, and every empty cell has either a new pin or a written reason.
+**Two reversions that changed nothing**, kept in the record because that is a
+finding about the code: a boolean is already excluded from `required_failed_runs`
+by the floor of two, and `purge_events` genuinely ignores two of its parameters —
+which are nonetheless load-bearing, because the outbox suite passes one both ways
+to assert it makes no difference. Both are now stated in the code.
+
+**What it does not establish.** The list of behaviours was built by reading the
+modules, which is the same faculty that missed F18 for four days. A sweep can
+only test the properties somebody thought to name.
 
 ## A-18. Gate the structure of the decision log
 

@@ -292,6 +292,14 @@ def purge_events(db, retention_days: int, max_attempts: int, delivery_configured
     Events dropped without ever being delivered are counted separately and the
     caller records one aggregated event for them, so the loss is visible rather
     than silent.
+
+    `max_attempts` and `delivery_configured` are deliberately unused. They read
+    as dead parameters and the A-17 sweep flagged them as such: a mutation that
+    forces `delivery_configured` true changes nothing, because nothing consults
+    it. They are kept because `04_tests/test_outbox.py` passes the flag both
+    ways and asserts the same outcome, which is how the rule "no event outlives
+    the window, whatever the reason it is still here" is pinned. Deleting them
+    would delete the only place that property is stated.
     """
     cutoff = utc_text(utc_now() - timedelta(days=retention_days))
     delivered = db.execute("DELETE FROM events WHERE delivered_to_notion=1 AND timestamp_utc < ?",
@@ -384,6 +392,16 @@ def acquire_run_lease(db, owner: str, minutes: int) -> bool:
     """
     cutoff = utc_now() - timedelta(minutes=minutes)
     try:
+        # IMMEDIATE, not deferred: the write lock is taken before the read, so
+        # two runs cannot both read "no lease" and then both write one. The A-17
+        # sweep could not construct a case where deferred changes the observable
+        # outcome here — SQLite refuses a deferred read-to-write upgrade outright
+        # rather than honouring `busy_timeout`, so the loser still declines — and
+        # the concurrency case in the suite passes either way. It is kept because
+        # it states the intent at the point where the intent matters, and because
+        # that equivalence is a property of the current pragmas rather than of
+        # this function. Recorded honestly: this line is unpinned, and the sweep
+        # says so rather than pretending otherwise.
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT owner, acquired_utc FROM run_lease WHERE id = 1").fetchone()
         if row is not None:

@@ -185,6 +185,29 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
         "a successful run between failures must reset the duration"
     gc.collect()
 
+# The run that announces an outage decides nothing in the same breath. The count
+# would refuse it anyway, since one failure cannot reach a floor of two, so this
+# is defence in depth rather than the last line — but the A-17 sweep found that
+# deleting the early return left every suite green, and a guard nothing checks is
+# a guard that will be deleted by someone tidying up.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=False)
+    watchdog.launch_reboot_notice = lambda detail="": None
+    db = watchdog.open_db(database)
+    # Chosen so the decision would be reached if the guard let it through: three
+    # failures inside the window, the oldest past the duration threshold. A
+    # scenario the count would refuse anyway proves nothing about the guard.
+    for minutes in (20, 12, 6):
+        db.execute("INSERT INTO runs (timestamp_utc, internet_available, execution_mode, "
+                   "configured_execution_mode) VALUES (?,0,'dry-run','dry-run')",
+                   (watchdog.utc_text(watchdog.utc_now() - timedelta(minutes=minutes)),))
+    db.commit(); db.close(); gc.collect()
+    assert call_main(config) == 0
+    assert events(database, "Monitoring started") == 1, "the outage must be announced"
+    assert events(database, "Dry-run") == 0, \
+        "the run that announces an outage must not also decide on it"
+    gc.collect()
+
 # A previous outage's failures must not make up the shortfall in a new one.
 # Found by the sixth review round, confirmed end to end, and missed by every
 # test above: the duration was scoped to the current episode and the count was
@@ -599,6 +622,28 @@ try:
         db.close(); gc.collect()
         assert notices and notices[-1], "the person at the machine must be told, with what was observed"
 
+    # The identity check must actually be on the path, and before the credentials
+    # go anywhere. The A-17 sweep found that deleting its only call site left all
+    # nine suites green: the function was tested thoroughly and never checked to
+    # be called, which is a pin on a function rather than on a behaviour.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+        order = []
+        original_identity = watchdog.check_router_identity
+        watchdog.check_router_identity = lambda db, cfg: order.append("identity") or True
+
+        async def note_reboot(_cfg):
+            order.append("reboot")
+            return True
+
+        try:
+            database, config, _ = drive_to_restart(temp, note_reboot)
+            assert call_main(config, ["--execute"]) == 0
+        finally:
+            watchdog.check_router_identity = original_identity
+        assert order == ["identity", "reboot"], \
+            f"the router's identity must be checked, and checked first: {order}"
+        gc.collect()
+
     # A restart that fails must be recorded, must exit non-zero, and must not
     # claim any of the success state. This is also the one error that leaves the
     # machine, so it must be sanitized.
@@ -847,6 +892,64 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     assert watchdog.get_state(db, "consecutive_skipped_runs") == "0", \
         "a run that proceeds must clear the counter, or the finding never goes away"
     db.close(); gc.collect()
+
+# Two runs racing for the lease: exactly one may be granted it. Every case above
+# takes the lease from one process at a time, which is not the situation the
+# lease exists for — the silent launcher returns before its child, so the next
+# trigger can start a second run while the first is still going.
+#
+# The rendezvous below is the only thing added: both connections are real, every
+# statement is executed by sqlite3, and the pause is placed where two runs would
+# genuinely interleave. A timeout rather than a hard barrier, because under
+# `BEGIN IMMEDIATE` the second run never reaches that statement while the first
+# holds the transaction — which is the point, and must not deadlock the suite.
+
+import threading
+
+
+class SynchronisedConnection:
+    """A real connection that pauses once, where two runs would interleave."""
+
+    def __init__(self, inner, barrier):
+        self._inner, self._barrier, self._paused = inner, barrier, False
+
+    def execute(self, sql, *args):
+        if sql.startswith("SELECT owner, acquired_utc") and not self._paused:
+            self._paused = True
+            try:
+                self._barrier.wait(timeout=5)
+            except threading.BrokenBarrierError:
+                pass
+        return self._inner.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database = Path(temp) / "race.sqlite3"
+    watchdog.open_db(database).close(); gc.collect()
+    barrier = threading.Barrier(2)
+    granted = []
+
+    def contend(owner):
+        db = sqlite3.connect(database)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA busy_timeout=5000")
+        try:
+            granted.append(watchdog.acquire_run_lease(
+                SynchronisedConnection(db, barrier), owner, watchdog.RUN_LEASE_MINUTES))
+        finally:
+            db.close()
+
+    racers = [threading.Thread(target=contend, args=(f"run-{index}",)) for index in range(2)]
+    for racer in racers:
+        racer.start()
+    for racer in racers:
+        racer.join(timeout=30)
+    assert granted.count(True) == 1, \
+        f"exactly one of two concurrent runs may hold the lease: {granted}"
+    gc.collect()
 
 # --- schema migration under two schedules ------------------------------------
 # The watchdog and the health monitor open the same database on their own

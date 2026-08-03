@@ -247,6 +247,26 @@ try:
         refused = "protected credential store" in str(error)
     record("a fallback backend is refused", refused)
 
+    # The module's whole claim is that a credential comes from a protected store
+    # and from nowhere else, and an environment variable is the first thing its
+    # docstring rules out. Until the A-17 sweep nothing checked it: adding an
+    # `os.environ` fallback to `get_secret` left all nine suites green. Checked
+    # on the keyring path, because that is the path the fallback would sit on —
+    # a systemd run returns from the credentials directory long before it.
+    class _EmptyKeyring(_FakeKeyring):
+        @staticmethod
+        def get_password(service, name):
+            return None
+
+    sys.modules["keyring"] = _EmptyKeyring(_RightBackend())
+    os.environ["router_password"] = "from-the-environment"
+    try:
+        record("a secret is never taken from the environment",
+               secrets_module.get_secret("router_password") is None,
+               repr(secrets_module.get_secret("router_password")))
+    finally:
+        del os.environ["router_password"]
+
     sys.modules["keyring"] = _FakeKeyring(_RightBackend())
     accepted = True
     try:
@@ -296,6 +316,7 @@ try:
                repr(secrets_module.get_secret("router_password")))
         record("an absent credential reads as missing rather than empty",
                secrets_module.get_secret("notion_token") is None)
+
 
         # With a credentials directory present the store is acceptable without
         # consulting keyring at all, which is what lets a service run with no

@@ -138,6 +138,23 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     record("a stale run is reported", codes(health.evaluate(db, cfg)) == ["stale-run"],
            f"codes={codes(health.evaluate(db, cfg))}")
 
+    # The bootstrap error log is the first place an operator looks when runs stop
+    # advancing, and this check is the only thing that says it moved. The A-17
+    # sweep found that removing the comparison altogether left every suite green:
+    # the stamp was being written and never compared, and no test noticed.
+    # Two calls, because the first is what records the baseline.
+    log = root / "bootstrap-errors.log"
+    log.write_text("first failure\n", encoding="utf-8")
+    health.evaluate(db, cfg)
+    log.write_text("first failure\nsecond failure\n", encoding="utf-8")
+    found = health.evaluate(db, cfg)
+    record("a changed bootstrap error log is reported", "bootstrap-changed" in codes(found),
+           f"codes={codes(found)}")
+    record("and an unchanged one is not", "bootstrap-changed" not in codes(health.evaluate(db, cfg)),
+           f"codes={codes(health.evaluate(db, cfg))}")
+    log.unlink()
+    health.evaluate(db, cfg)
+
     db.execute("INSERT INTO events(timestamp_utc,status,action,detail) VALUES(?,?,?,?)",
                (watchdog.utc_text(watchdog.utc_now() - timedelta(hours=6)), "Offline", "Monitoring started", "x"))
     db.commit()
