@@ -26,14 +26,14 @@ a proposal for the owner to pick from, in whatever order he chooses.
 | A-04 | Verify and record the deployed state on the monitoring host | Assurance | — | **Done 3 Aug** |
 | A-05 | Restore the declared line endings on `scripts/Install.ps1` | Correction | — | **Done 3 Aug** |
 | A-06 | Soak the Debian path under a real `systemd` | Evidence | — | **Part done 3 Aug**; credentials still unverified |
-| A-14 | Make `install.sh` executable in the index | Correction | — | Proposed |
-| A-15 | Set `StateDirectoryMode` and `LogsDirectoryMode` on both units | Defect | — | Proposed |
+| A-14 | Make `install.sh` executable in the index | Correction | — | **Done 3 Aug** |
+| A-15 | Set `StateDirectoryMode` and `LogsDirectoryMode` on both units | Defect | — | **Done 3 Aug** |
 | A-16 | Do not enable the timers before credentials exist | Defect | — | Proposed |
 | A-07 | Verify the desktop notice against a real session bus | Evidence | A-06 | Blocked on a session |
 | A-08 | First real recovery verification | Evidence | — | Partly observed 29 Jul |
 | A-09 | Decide whether to close F6 with an off-host observer | Decision | — | Proposed |
-| A-10 | Find out why the bootstrap-log health check never fires | Defect | — | **Open, cause unknown** |
-| A-11 | Stop the launcher suite writing to the real bootstrap log | Defect | — | Proposed |
+| A-10 | Find out why the bootstrap-log health check never fires | Not a defect | — | **Closed 3 Aug — the tool was wrong, not the code** |
+| A-11 | Stop the launcher suite writing to a real path | Defect | — | Proposed, consequence corrected |
 | A-12 | Record the router certificate at a calm moment, not before a restart | Design | — | Proposed |
 | A-13 | Correct the claim that `validate_config` requires `router.model` | Correction | — | Proposed |
 
@@ -164,57 +164,60 @@ The delivery routine in the project memory has been corrected to say so.
 
 **Effort.** Two minutes.
 
-## A-10. Find out why the bootstrap-log health check never fires
+## A-10. Why the bootstrap-log health check appeared never to fire — closed, no defect
 
-**Severity: high.** A health check that cannot fire is worse than no check,
-because the dashboard reads green either way and one of them is a promise.
+**Closed on 3 August. The health monitor was right and the instrument was
+wrong.** Recorded in full because the mistake is more useful than the
+non-finding.
 
-**What is established.** All of this was observed on the monitoring host on
-3 August, not inferred:
+**What was actually happening.** The scheduled task and the MCP PowerShell shell
+used to inspect the machine see **two different files at the same path**. Proved
+by asking a temporary scheduled task of its own to stat the file and comparing:
 
-* `health_bootstrap_stamp` in the state table records a file of 3458 bytes with
-  an mtime of 27 July 19:39. The file has been 29661 bytes since 28 July 15:06.
-* The `health` table holds 434 rows and every one of them says healthy. No
-  finding of any kind has ever been recorded, by any check.
-* Run in a shell against a **copy of that same production database** with the
-  production configuration, `evaluate()` returns `bootstrap-changed` and updates
-  the stamp. So neither the code nor the data explains the silence.
-* The home-directory fallback path, `%USERPROFILE%\ZenWiFiMonitor`, has never
-  been created, and a `wscript.exe`-launched probe does see `LOCALAPPDATA`. The
-  obvious explanation — that the scheduled process resolves the path elsewhere —
-  is therefore not supported by the evidence either.
+| | `%LOCALAPPDATA%\ZenWiFiMonitor\bootstrap-errors.log` |
+|---|---|
+| what the scheduled task sees | 3458 bytes, modified 27 July 21:39 |
+| what the inspecting shell sees | 29661 bytes, modified 28 July 17:06 |
 
-**What is not established: the cause.** The check works when a person runs it
-and does not work when the scheduler runs it, and the difference has not been
-found. This entry deliberately records that as an open question rather than
-dressing a hypothesis as a diagnosis.
+`health-notified.txt` diverges the same way, each view carrying its own copy.
 
-**Next step.** Let one real health run write what it finds, with the
-notification surface substituted so no dialog appears, and compare its view of
-the path and the stamp with the shell's. That writes one true health row and
-needs saying out loud first, because on this machine the run will legitimately
-report `bootstrap-changed`.
+So the health monitor has been comparing its stamp against *its* file, which has
+genuinely not changed since 27 July, and correctly reporting nothing. The
+"silence" was an artefact of comparing its stamp against a file only the
+inspecting shell can see. Every health row saying healthy was true.
 
-**Why it matters beyond itself.** This is F11 wearing different clothes. That
-finding was about the bootstrap log resolving somewhere the Debian service could
-not write; the fourth review round found the Debian half and nobody looked at
-the Windows half. `00_admin/HANDOVER.md` still tells an operator that this log
-is the first place to look when runs stop advancing.
+**What this costs.** Not the code — the tooling. Any observation of
+`%LOCALAPPDATA%` made through that shell is not the scheduled jobs' view and
+must not be treated as evidence about them. That includes parts of A-04. The
+SQLite database is unaffected: it lives outside that path and both views agree
+on it, which is why the scheduled runs' health rows are visible in the database
+this session read.
 
-## A-11. Stop the launcher suite writing to the real bootstrap log
+**This project already knew.** The July incident with the relocated virtual
+environment ended with exactly this lesson written down: the MCP shell and the
+scheduled task have different filesystem views. It cost four wrong hypotheses
+then, and most of an investigation now. The rule earned twice: **to learn what a
+scheduled task sees, ask a scheduled task.**
 
-**Severity: medium.** Every one of the 261 lines in the live bootstrap error log
-was written by `04_tests/test_wrapper.py`. The suite drives the real
-`scripts/RouterWatchdog.vbs` with fourteen arguments it must refuse, and the
-launcher records each refusal in the real log at `%LOCALAPPDATA%`.
+**No action follows for the monitor.** What follows is for the operator's
+documentation: `00_admin/HANDOVER.md` now says that this path cannot be
+inspected from a remote shell and how to ask properly.
 
-Three consequences, in increasing order of seriousness. The operator's first
-troubleshooting location contains only test noise and not one real failure. The
-project's own principle — that a suite touches no real machine state and cannot
-race the live scheduled job — is contradicted by one of its nine suites, and its
-docstring does not say so. And the health monitor's `check_bootstrap_log` exists
-to report exactly this file changing, so running the suite is supposed to raise a
-false alarm on the next health run. It did not, which is A-10.
+## A-11. Stop the launcher suite writing to a real path
+
+**Severity: medium; the behaviour is real, the consequence was overstated.**
+`04_tests/test_wrapper.py` drives the real `scripts/RouterWatchdog.vbs` with
+fourteen arguments it must refuse, and the launcher records each refusal in the
+bootstrap error log at `%LOCALAPPDATA%`. One of the nine suites therefore writes
+to a real machine path, contradicting the principle the others state, and its
+docstring does not say so.
+
+**Corrected after A-10.** The 261 lines of test output were originally described
+as polluting the operator's first troubleshooting location. They are not: they
+landed in the inspecting shell's view of that path, and the file the scheduled
+jobs actually read still holds 3458 bytes of real history from 27 July. The
+suite has been writing to *a* real path, not to *the operator's* one — which is
+luck, not design, and does not make it acceptable.
 
 **Remedy.** Point the launcher at a temporary log for the duration of the suite,
 or give the wrapper a documented way to be told where to write and use it from

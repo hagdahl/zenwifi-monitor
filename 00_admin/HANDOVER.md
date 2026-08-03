@@ -24,6 +24,7 @@
 - `scripts/check_dependencies.py` is the scheduled dependency review. It asks PyPI whether a direct dependency has a newer release and OSV whether any pinned version, direct or transitive, is known to be vulnerable, and it changes nothing: an upgrade means regenerating `requirements.lock.txt` with `uv pip compile --universal --generate-hashes` and running every suite on both platforms. `.github/workflows/dependency-review.yml` runs it weekly and keeps one tracking issue up to date. Standard library only, so it works before the environment exists.
 - The project version lives in the root `VERSION` file. Every tracked file mirrors it; run `python scripts/check_versions.py` after any change and before any release. It needs only the standard library and Git.
 - Bootstrap failures before SQLite opens are recorded at `%LOCALAPPDATA%\ZenWiFiMonitor\bootstrap-errors.log` on Windows and `/var/log/zenwifi-monitor/bootstrap-errors.log` on Debian; this is the first troubleshooting location when regular run rows stop advancing. `install.sh --install` refuses when the service account cannot write that directory, because a failure the monitor hit before opening its database leaves nothing else to read.
+- **`%LOCALAPPDATA%` cannot be inspected from a remote or agent shell and be believed.** A shell reaching this machine through an assistant integration and the scheduled tasks resolve that path to different files. On 3 August the same path held 3458 bytes modified 27 July for the scheduled task and 29661 bytes modified 28 July for the inspecting shell, each with its own `health-notified.txt` beside it. That covers the bootstrap error log, the health notification stamp and the virtual environment at `%LOCALAPPDATA%\ZenWiFiMonitor\.venv`. To learn what a scheduled task sees, ask a scheduled task: register a temporary task that stats or copies the file and read its output, then delete that task — never the project's own two. The SQLite database is outside this path and both views agree on it. This has now cost two investigations, the July interpreter incident and A-10.
 
 ## Last verified deployment
 
@@ -39,12 +40,18 @@ the previous twenty-four hours, which is the machine being off for two thirds of
 the day rather than a fault. All events delivered to Notion, none pending or
 exhausted.
 
-Known gap at that date: the `health_bootstrap_stamp` has not moved since 27 July
-although the bootstrap error log changed on 28 July, and no health row has ever
-been anything but healthy. The check works when run by hand against a copy of
-the same database, so this is not a code fault that has been found yet. Tracked
-as A-10 in `01_docs/NEXT_ACTIONS.md`. **Until it is closed, treat the health
-monitor's silence about that log as unproven rather than as evidence.**
+One observation in that check was recorded as a gap and has since been
+withdrawn. The `health_bootstrap_stamp` had not moved since 27 July although the
+bootstrap error log appeared to change on 28 July, and no health row had ever
+been anything but healthy. That was not a fault: the two files are different
+files, seen from two different views of `%LOCALAPPDATA%`, and the health monitor
+was reading its own correctly. Closed as A-10 in `01_docs/NEXT_ACTIONS.md` on 3
+August, no defect. **The qualification that survives is about the instrument,
+not the monitor: any part of this record that came from inspecting
+`%LOCALAPPDATA%` through a remote shell describes that shell's view and not the
+scheduled jobs'.** The task registrations, the run rows, the event delivery and
+the working-tree state above were read from Task Scheduler and from SQLite, both
+of which the two views agree on.
 
 ## Recovery
 
