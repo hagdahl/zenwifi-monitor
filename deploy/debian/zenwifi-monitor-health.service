@@ -55,8 +55,14 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 UMask=0077
 
+# Both Mode lines are required on this unit too. systemd applies them on every
+# start, and the health timer fires between the watchdog's, so leaving them off
+# here would widen the directories again ten minutes after the watchdog set
+# them. See the watchdog unit for what was observed.
 StateDirectory=zenwifi-monitor
+StateDirectoryMode=0750
 LogsDirectory=zenwifi-monitor
+LogsDirectoryMode=0750
 ReadWritePaths=/var/lib/zenwifi-monitor /var/log/zenwifi-monitor
 
 [Install]

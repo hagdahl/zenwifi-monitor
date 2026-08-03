@@ -65,8 +65,18 @@ UMask=0077
 # ProtectSystem=strict makes the whole filesystem read-only, so the two paths
 # the monitor legitimately writes are named explicitly. Adding a third path here
 # is a decision, not a detail.
+#
+# The Mode lines are not decoration. systemd applies StateDirectoryMode and
+# LogsDirectoryMode on EVERY start, not only when it creates the directory, and
+# both default to 0755. Without them the installer's `install -d -m 0750` is
+# silently widened the first time a timer fires, which was observed on a real
+# systemd on 3 August 2026: the directories were set to 0750 by hand, the
+# service was started, and both came back 0755. The state directory holds the
+# database, which carries the router address and the whole run history.
 StateDirectory=zenwifi-monitor
+StateDirectoryMode=0750
 LogsDirectory=zenwifi-monitor
+LogsDirectoryMode=0750
 ReadWritePaths=/var/lib/zenwifi-monitor /var/log/zenwifi-monitor
 
 [Install]

@@ -127,6 +127,18 @@ for name, text in (("watchdog", WATCHDOG), ("health", HEALTH)):
     record(f"the {name} unit names every writable path explicitly",
            directive(text, "ReadWritePaths") == ["/var/lib/zenwifi-monitor /var/log/zenwifi-monitor"],
            str(directive(text, "ReadWritePaths")))
+    # systemd applies these on EVERY start, not only when it creates the
+    # directory, and both default to 0755. Without them the installer's 0750 is
+    # widened the first time a timer fires — observed on a real systemd on
+    # 3 August 2026, by setting 0750 by hand, starting the service and watching
+    # both come back 0755. The behavioural check cannot be reproduced in the
+    # mount-namespace harness below, which has no init, so the declaration is
+    # what is pinned here and the observation is recorded in the changelog.
+    for key in ("StateDirectoryMode", "LogsDirectoryMode"):
+        record(f"the {name} unit sets {key}=0750",
+               directive(text, key) == ["0750"], str(directive(text, key)))
+    record(f"the {name} unit creates files private to the service account",
+           directive(text, "UMask") == ["0077"], str(directive(text, "UMask")))
 
 # --- the watchdog gets its credentials from systemd, not from a file ---------
 
