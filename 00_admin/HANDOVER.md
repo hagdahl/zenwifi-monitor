@@ -25,6 +25,27 @@
 - The project version lives in the root `VERSION` file. Every tracked file mirrors it; run `python scripts/check_versions.py` after any change and before any release. It needs only the standard library and Git.
 - Bootstrap failures before SQLite opens are recorded at `%LOCALAPPDATA%\ZenWiFiMonitor\bootstrap-errors.log` on Windows and `/var/log/zenwifi-monitor/bootstrap-errors.log` on Debian; this is the first troubleshooting location when regular run rows stop advancing. `install.sh --install` refuses when the service account cannot write that directory, because a failure the monitor hit before opening its database leaves nothing else to read.
 
+## Last verified deployment
+
+On Windows there is no separate install step: the scheduled tasks run the
+working tree through the silent launcher, so whatever is checked out is what
+runs every five minutes. Verify it rather than assume it, and record the result
+here.
+
+**3 August 2026, commit `69121ac`, on the monitoring host.** Working tree clean. Both tasks
+registered against this folder through `wscript.exe`, only `ZenWiFiMonitor`
+carrying `--execute`, last result 0. Runs five minutes apart and current; 97 in
+the previous twenty-four hours, which is the machine being off for two thirds of
+the day rather than a fault. All events delivered to Notion, none pending or
+exhausted.
+
+Known gap at that date: the `health_bootstrap_stamp` has not moved since 27 July
+although the bootstrap error log changed on 28 July, and no health row has ever
+been anything but healthy. The check works when run by hand against a copy of
+the same database, so this is not a code fault that has been found yet. Tracked
+as A-10 in `01_docs/NEXT_ACTIONS.md`. **Until it is closed, treat the health
+monitor's silence about that log as unproven rather than as evidence.**
+
 ## Recovery
 
 1. Disable the scheduled task.
