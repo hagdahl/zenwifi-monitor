@@ -53,6 +53,13 @@ scheduled jobs'.** The task registrations, the run rows, the event delivery and
 the working-tree state above were read from Task Scheduler and from SQLite, both
 of which the two views agree on.
 
+## Before changing anything
+
+`00_admin/LESSONS_LEARNED.md` records what seven review rounds cost to learn,
+ordered by what each one cost. The first entry is the failure mode this project
+produces repeatedly — a correct function whose call site nobody checks — and it
+is worth reading before adding any behaviour that matters.
+
 ## Recovery
 
 1. Disable the scheduled task.
