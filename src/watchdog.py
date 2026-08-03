@@ -446,8 +446,21 @@ def outage_evidence(db, cfg: dict) -> dict:
       run in between moves the reference forward, which is correct, because
       flapping is not an outage.
     * evidence — at least `required_failed_runs` failed runs fall within the
-      last `failure_window_minutes`. This is what makes a gap harmless. History
-      cannot satisfy a count taken over a recent window.
+      last `failure_window_minutes` **and after the most recent successful
+      run**. This is what makes a gap harmless. History cannot satisfy a count
+      taken over a recent window.
+
+    That second clause was missing until the sixth review round found it, and
+    its absence is worth spelling out because the two conditions looked
+    independent and were not. The duration was measured from the current
+    episode while the count was taken over the window regardless of episode, so
+    failures from a previous outage that had already ended could make up the
+    shortfall in a new one. Two failures at 09:50 and 09:55, connectivity back
+    at 09:57, then failures at 10:00 and 10:20 across a sleep, and the monitor
+    saw four failures where the current episode held two — enough to restart the
+    router on evidence half of which described an outage that was over. Both
+    figures now come from the same episode, which is the only reading under
+    which the two conditions mean what the docstring says they mean.
 
     Returns the figures rather than a verdict, so the caller can report what was
     observed instead of asserting a constant.
@@ -459,12 +472,28 @@ def outage_evidence(db, cfg: dict) -> dict:
                             REQUIRED_FAILED_RUNS)
     window_start = utc_text(now - timedelta(minutes=window))
 
-    failed_in_window = db.execute(
-        "SELECT COUNT(*) FROM runs WHERE internet_available = 0 AND timestamp_utc >= ?",
-        (window_start,)).fetchone()[0]
+    # The successful run is found first, because both figures are scoped to the
+    # episode it ends. Counting before knowing where the episode starts is the
+    # defect this ordering makes impossible to reintroduce by accident.
     last_online_row = db.execute(
         "SELECT MAX(timestamp_utc) FROM runs WHERE internet_available = 1").fetchone()
     last_online = last_online_row[0] if last_online_row else None
+
+    if last_online:
+        # The window is still applied. It is a lower bound on recency, not a
+        # substitute for the episode boundary: a failure from this episode that
+        # is older than the window is not evidence that the outage is current.
+        failed_in_window = db.execute(
+            "SELECT COUNT(*) FROM runs WHERE internet_available = 0 "
+            "AND timestamp_utc >= ? AND timestamp_utc > ?",
+            (window_start, last_online)).fetchone()[0]
+    else:
+        # Nothing has ever succeeded, so there is no episode boundary to apply
+        # and the window is the whole of the constraint. A host that has been
+        # offline since installation must still be able to gather its evidence.
+        failed_in_window = db.execute(
+            "SELECT COUNT(*) FROM runs WHERE internet_available = 0 AND timestamp_utc >= ?",
+            (window_start,)).fetchone()[0]
 
     if last_online:
         first_failure_row = db.execute(

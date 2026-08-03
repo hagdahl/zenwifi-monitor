@@ -3,24 +3,30 @@
 # Proposed next actions
 
 Every planned item in `01_docs/IMPROVEMENT_PLAN.md` is implemented and every
-finding from five independent review rounds is closed, except F6, which the
+finding from six independent review rounds is closed, except F6, which the
 project owner accepted rather than engineered away. What follows is not a
 backlog of missing work; it is what a project in that state should do next.
 
 Identifiers are `A-nn` and are permanent. They do not collide with the review
-findings (`F1`–`F17`, which are defects) or the decision log (`ADR-001`
+findings (`F1`–`F19`, which are defects) or the decision log (`ADR-001`
 onwards). An action that is completed is marked done here and keeps its
 identifier, so a later document can refer to it without ambiguity.
 
-A-04 and A-05 are done. A-06 is running. A-10 to A-13 were not proposed by
-anybody: they came out of A-04, which is what a verification is for. The rest is
-a proposal for the owner to pick from, in whatever order he chooses.
+The sixth round is done, and it is the reason to keep doing them: it found a
+Blocker in the restart decision that five rounds and nine suites had passed
+over, and it found it in code written four days earlier to close a different
+Blocker. A-10 to A-13 came out of A-04, F18 and F19 out of A-01, and A-17 and
+A-18 out of what those two exposed about the tests and the tooling rather than
+about the product. That is what verification is for. The rest is a proposal for
+the owner to pick from, in whatever order he chooses.
 
 ## Summary
 
 | ID | Action | Class | Depends on | State |
 |---|---|---|---|---|
-| A-01 | Sixth independent review of `69121ac` | Assurance | — | Proposed |
+| A-01 | Sixth independent review | Assurance | — | **Done 3 Aug — one Blocker, confirmed and fixed** |
+| F18 | Failures from an ended episode could authorise a restart | Defect | — | **Closed 3 Aug** |
+| F19 | The wrapper suite decoded Windows Script Host output blindly | Defect | — | **Closed 3 Aug, unreproduced here** |
 | A-02 | Upgrade `keyring` 25.6.0 → 25.7.0 | Maintenance | A-01 | Proposed |
 | A-03 | Release 0.1.0 | Release | A-01, A-02 | Proposed |
 | A-04 | Verify and record the deployed state on the monitoring host | Assurance | — | **Done 3 Aug** |
@@ -36,31 +42,52 @@ a proposal for the owner to pick from, in whatever order he chooses.
 | A-11 | Stop the launcher suite writing to a real path | Defect | — | Proposed, consequence corrected |
 | A-12 | Record the router certificate at a calm moment, not before a restart | Design | — | Proposed |
 | A-13 | Correct the claim that `validate_config` requires `router.model` | Correction | — | Proposed |
+| A-17 | Sweep every suite for pins that cannot fail | Assurance | — | Proposed |
+| A-18 | Gate the structure of the decision log | Correction | — | Proposed |
 
-## A-01. Sixth independent review of `69121ac`
+## A-01. Sixth independent review — done 3 August
 
-**Why.** Everything published since `b285abe` is unreviewed: the fifth round's
-own remedies, F16, F17, the restart bound, the certificate comparison, the
-stricter validation rules, ADR-027, ADR-028, and the dependency review tool and
-workflow. That is roughly twelve hundred lines, and it touches the safety model
-in three places — when a restart is allowed, when it stops being allowed, and
-what the monitor will accept as the router.
+**Outcome: NOT READY on both counts, and the reviewer was right.** The round was
+run by an independent agent against the published `d1ab7c8` using
+`01_docs/CODEX_REVIEW_PROMPT.md`. Its report is
+`01_docs/CODEX_REVIEW_d1ab7c81b25d7ebaac5fa1bf02689977ac3c978b.md`. One Blocker,
+one Medium, and claim 1 and claim 7 of the seven not upheld.
 
-The argument is the project's own history, not caution in the abstract. The
-fifth round existed to check the fourth round's fixes and found three defects in
-them, one of which was a false claim in this project's own changelog that a
-finding had been closed. A round of fixes that has not been reviewed is not
-evidence of anything.
+**The Blocker, recorded here as F18 and now closed.** `outage_evidence()` scoped
+the duration to the current outage and did not scope the count. Failures from an
+episode that had already ended could make up the shortfall in a new one, and in
+execute mode that is the branch that calls the router. Confirmed twice before
+anything was changed: in isolated SQLite, and end to end through `main()` on the
+real code path with a control that differs only in the earlier episode's
+failures and is correctly refused. Fixed by taking both figures from the same
+episode; four reversions recorded, each observed to fail a named assertion.
+ADR-023 claimed the property the code did not deliver and is corrected;
+ADR-029 records the correction.
 
-**Scope.** `01_docs/INDEPENDENT_REVIEW_PROMPT.md` bound to `69121ac`, with the
-reviewer told which findings the range claims to close and required to refute
-each of its own findings before reporting it, and to say which it confirmed by
-executing something rather than by reading.
+**The finding under the finding.** The reviewer mutated the query to the form it
+believed correct and the whole watchdog suite stayed green. Nine suites, and
+none of them was holding the rule in place. That is worth more than the bug and
+is why A-17 now exists.
 
-**Done when.** A report exists in `01_docs/`, each finding is closed or
-explicitly accepted in writing, and the improvement plan records the round.
+**The Medium, recorded as F19.** `04_tests/test_wrapper.py` decoded Windows
+Script Host's output with whatever codec `text=True` picks, which is not the code
+page WSH writes; the reviewer hit a `UnicodeDecodeError` that surfaced as a
+launcher apparently failing to refuse. The suite now captures bytes, because only
+the exit code is asserted. **It could not be reproduced on the monitoring host**,
+where that path emits no bytes at all — measured, not assumed — so the change
+removes a dependency rather than fixing an observed failure, and the reviewer's
+exit code 1 was more likely `cscript` failing for a reason its environment
+supplied. Recorded that way rather than claimed as a fix.
 
-**Effort.** One session. It may generate more.
+**What the round did not establish.** It ran on Python 3.14 rather than the
+documented 3.11, could not reach the public remote, and had neither root, a
+POSIX mount namespace nor `systemd`, so the Debian installer claims were only
+read. The report says all of this plainly, which is the reason to trust the rest
+of it. Claims 2 to 6 were upheld by reading and by the tests that could run.
+
+**Still owed.** A seventh round against the fix, once A-17 has run — reviewing a
+correction with the same suites that missed the defect is the pattern this
+project has already been caught by twice.
 
 ## A-02. Upgrade `keyring` 25.6.0 → 25.7.0
 
@@ -223,6 +250,43 @@ luck, not design, and does not make it acceptable.
 or give the wrapper a documented way to be told where to write and use it from
 the test. Then say in the docstring which real surfaces the suite touches, if
 any remain.
+
+## A-17. Sweep every suite for pins that cannot fail
+
+**Why.** ADR-026 says a pin is not accepted until the behaviour has been
+reverted and the test observed to fail. That rule has been applied to every
+change made since it was written, and to nothing written before it. The sixth
+round demonstrated the gap in one line: it mutated the failed-run query to the
+correct form and all nine suites stayed green. The rule was already in the
+decision log while the code it was meant to protect was unprotected.
+
+**What.** Take each safety-relevant behaviour the suites claim to hold — the two
+activation gates, the delivery gate, the lease, the outbox bounds, the health
+findings, the installer's ownership and modes, the launcher's allowlist — revert
+each one in a scratch copy and record which suite fails. Anything that survives
+its own reversion is a finding, not a chore.
+
+**Effort.** Longer than it sounds, and the only honest way to know what the
+suites are worth. Roughly forty behaviours.
+
+**Done when.** A table exists of behaviour, reversion, and the assertion that
+caught it, and every empty cell has either a new pin or a written reason.
+
+## A-18. Gate the structure of the decision log
+
+**Why.** ADR-027 and ADR-028 were appended with the two characters `\n` instead
+of newlines, so both rendered inside ADR-027's last table cell and the file ended
+without a trailing newline. It survived a publication, a mirror, a leak scan and
+an independent review, because every one of those reads content and none of them
+reads shape. Written by this project's own tooling, which is the part worth
+fixing.
+
+**What.** Extend `scripts/check_versions.py`, or add a sibling, to assert that
+`00_admin/DECISIONS.md` is a well-formed table: one row per ADR, identifiers
+consecutive from ADR-001, no literal escape sequences, a trailing newline. The
+same check should reject a row whose cell count differs from the header's.
+
+**Effort.** Small, and it closes a class rather than an instance.
 
 ## A-12. Record the router certificate at a calm moment, not before a restart
 

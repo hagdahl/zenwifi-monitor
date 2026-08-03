@@ -185,6 +185,86 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
         "a successful run between failures must reset the duration"
     gc.collect()
 
+# A previous outage's failures must not make up the shortfall in a new one.
+# Found by the sixth review round, confirmed end to end, and missed by every
+# test above: the duration was scoped to the current episode and the count was
+# not, so the two conditions that look independent were sharing one loophole.
+# Both figures now come from the same episode.
+#
+# The sequence is written by main() on the real path, and only the clock is
+# moved. Two failures, connectivity back, then two failures across a gap: the
+# current episode holds two failed runs against a requirement of three, and the
+# window still contains the two from the episode that already ended.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "execute", False, online=False)
+    async def forbidden_reboot(_): raise AssertionError(
+        "a restart must not be reached on a previous episode's failures")
+    watchdog.reboot_router = forbidden_reboot
+    watchdog.launch_reboot_notice = lambda detail="": (_ for _ in ()).throw(
+        AssertionError("no notice, because there is nothing to announce"))
+    for _ in range(2):
+        assert call_main(config, ["--execute"]) == 0   # the outage that ends
+    watchdog.internet_available = lambda _: True
+    assert call_main(config, ["--execute"]) == 0       # connectivity returns
+    watchdog.internet_available = lambda _: False
+    assert call_main(config, ["--execute"]) == 0       # the new outage begins
+    age_runs(database, [28, 26, 24, 20])
+    assert call_main(config, ["--execute"]) == 0       # and is observed again now
+    assert events(database, "Dry-run") == 0 and events(database, "Router restarted") == 0, \
+        "two failures in this episode must not be topped up by two from the last one"
+    gc.collect()
+
+
+# The recency window still does work after the episode scoping, and this pins
+# it. Scoping alone would let an episode's own old failures satisfy the count
+# after a long monitoring gap: two failures, ten hours asleep, one failed probe
+# on waking, and the count is three with one current observation. That is the
+# regression above wearing the previous episode's clothes, and until this case
+# was written the suite stayed green when the window was removed.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=True)
+    watchdog.launch_reboot_notice = lambda detail="": None
+    assert call_main(config) == 0
+    watchdog.internet_available = lambda _: False
+    for _ in range(2):
+        assert call_main(config) == 0
+    age_runs(database, [600, 598, 596])
+    assert call_main(config) == 0
+    assert events(database, "Dry-run") == 0, \
+        "one observation after a gap must not be topped up by this episode's own history"
+    gc.collect()
+
+# The other half of that pin, so it cannot be satisfied by a rule that simply
+# never decides: an episode that supplies the whole count by itself, with a
+# successful run before it, must still reach the decision.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=True)
+    watchdog.launch_reboot_notice = lambda detail="": None
+    assert call_main(config) == 0                      # connectivity, then lost
+    watchdog.internet_available = lambda _: False
+    for _ in range(3):
+        assert call_main(config) == 0
+    age_runs(database, [40, 20, 12, 6])
+    assert call_main(config) == 0
+    assert events(database, "Dry-run") == 1, \
+        "an episode that supplies its own evidence must still reach the decision"
+    gc.collect()
+
+# A host that has never seen a successful run must still be able to gather its
+# evidence: there is no episode boundary to scope the count to, so the window is
+# the whole of the constraint. Scoping to "after the last success" when there
+# has never been one would disable the monitor on exactly the installation that
+# needs it most.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=False)
+    for _ in range(3):
+        assert call_main(config) == 0
+    age_runs(database, [20, 12, 6])
+    assert call_main(config) == 0
+    assert events(database, "Dry-run") == 1, \
+        "an outage since installation must still reach a decision"
+    gc.collect()
+
 # Recovery must clear the announcement marker, so the next outage is announced
 # again. Since the marker is no longer a decision input this is a log defect
 # rather than a safety one, but an outage that starts without a "Monitoring

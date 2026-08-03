@@ -47,6 +47,11 @@ def record(name, passed, detail=""):
 
 ANALYSER = r"""
 param([string]$Path)
+# The report is read back as UTF-8, so it must be written as UTF-8. Without
+# this the JSON leaves in the console code page and the Python side decodes it
+# with whatever `text=True` guesses, which is the same class of mismatch that
+# broke the launcher checks on a non-English Windows.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 $parseErrors = $null
 $tokens = $null
 $tree = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
@@ -97,7 +102,8 @@ if shell:
         completed = subprocess.run(
             [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
              "-File", str(analyser), "-Path", str(INSTALLER)],
-            capture_output=True, text=True, timeout=180)
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=180)
         record("the installer could be parsed", completed.returncode == 0,
                completed.stderr[-400:])
         report = json.loads(completed.stdout)
@@ -192,8 +198,15 @@ if sys.platform != "win32":
            True, "skipped")
 else:
     for argument in REFUSED:
+        # Bytes, deliberately: only the exit code is asserted, and decoding
+        # Windows Script Host's output is a guess. It writes its diagnostics in
+        # the console code page, which is not the code page Python picks for
+        # `text=True`, so on a non-English Windows the reader thread raises
+        # UnicodeDecodeError and the suite reports exit code 1 — a decoding
+        # accident wearing the costume of a launcher that failed to refuse.
+        # Found by the sixth review round on a host where that mismatch is real.
         completed = subprocess.run(["cscript.exe", "//nologo", "//B", str(WRAPPER), argument],
-                                   capture_output=True, text=True, timeout=60)
+                                   capture_output=True, timeout=60)
         record(f"the launcher refuses {argument!r}", completed.returncode == 2,
                f"exit code was {completed.returncode}")
 
