@@ -208,6 +208,27 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
         "the run that announces an outage must not also decide on it"
     gc.collect()
 
+# The duration is measured from the first OBSERVED failure of this outage, not
+# from the last successful run. The difference only shows after a monitoring
+# gap, and it is the difference between the documented rule and the implemented
+# one — four documents said the weaker thing until the seventh review round.
+# Pinned here so that correcting the code to match the old wording fails.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=True)
+    watchdog.launch_reboot_notice = lambda detail="": None
+    assert call_main(config) == 0                      # connectivity, an hour ago
+    watchdog.internet_available = lambda _: False
+    for _ in range(3):
+        assert call_main(config) == 0
+    # Successful run 60 minutes back, the machine asleep, then three failures in
+    # the last ten minutes. The last successful run is far older than the
+    # fifteen-minute threshold; the observed outage is not.
+    age_runs(database, [60, 10, 6, 2])
+    assert call_main(config) == 0
+    assert events(database, "Dry-run") == 0, \
+        "ten minutes of observed failure must not restart on the age of a successful run"
+    gc.collect()
+
 # A previous outage's failures must not make up the shortfall in a new one.
 # Found by the sixth review round, confirmed end to end, and missed by every
 # test above: the duration was scoped to the current episode and the count was
@@ -812,6 +833,126 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     decide(database, config)
     assert events(database, "Dry-run") == 3, \
         "a restored connection must clear the count, or one bad day disables the monitor"
+    gc.collect()
+
+# --- the calls that gate everything else are on the path ----------------------
+# Found by the seventh review round. Both are exhaustively tested as functions
+# and neither was checked to be CALLED: deleting either from main() left all
+# nine suites green. That is the same shape as F18 and as the identity check
+# above — the part everyone looks at is tested, the join is not — and it is now
+# the fourth time this project has produced it.
+
+original_store = watchdog.require_persistent_secret_store
+try:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+        database, config = build(temp, "dry-run", False, online=True)
+
+        def refuse():
+            raise RuntimeError("The operating system's protected credential store is required.")
+
+        watchdog.require_persistent_secret_store = refuse
+        # main() lets this propagate; the module entry point records it and exits
+        # 1. Either shape is a refusal, and both are asserted rather than one
+        # assumed: what must not happen is the run continuing.
+        refused = False
+        try:
+            refused = call_main(config) != 0
+        except RuntimeError:
+            refused = True
+        assert refused, "a run must not proceed when the protected credential store is refused"
+        db = watchdog.open_db(database)
+        assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0, \
+            "and it must not even record a run, because it never got that far"
+        db.close(); gc.collect()
+finally:
+    watchdog.require_persistent_secret_store = original_store
+
+# The same for validation. Without this, every floor in validate_config is
+# inert on the only path that matters: a one-minute threshold, a non-HTTPS
+# probe list and plain HTTP without acknowledgement would all reach a live run.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    root = Path(temp); database = root / "state.sqlite3"; config = root / "config.json"
+    config.write_text(json.dumps({
+        "paths": {"state_database": str(database)},
+        "router": {"host": "router.invalid"},
+        "monitor": {"probe_urls": ["http://plain.invalid"],
+                    "failure_minutes_before_reboot": 15, "reboot_cooldown_minutes": 30},
+        "notion": {}, "execution_mode": "dry-run"}), encoding="utf-8")
+    watchdog.require_persistent_secret_store = lambda: None
+    watchdog.internet_available = lambda _: True
+    refused = False
+    try:
+        refused = call_main(config) != 0
+    except RuntimeError:
+        refused = True
+    assert refused, "a run must not proceed on a configuration validate_config rejects"
+    assert not database.exists(), "and it must not even open the database it names"
+    gc.collect()
+
+# --- the bound holds when the restarts FAIL -----------------------------------
+# The seventh round's Blocker-adjacent finding, confirmed before it was fixed:
+# the bound counted 'Router restarted' and 'Dry-run' and nothing else, so a
+# restart that raised was counted by nothing. Eight attempts were made against a
+# bound of two, with no warning ever recorded. A restart that fails is stronger
+# evidence that restarting will not help than one that succeeds.
+
+original_reboot_here = watchdog.reboot_router
+original_notice_here = watchdog.launch_reboot_notice
+original_identity_here = watchdog.check_router_identity
+try:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+        database, config = bounded_config(temp, allowed=2)
+        attempts = []
+        notices = []
+
+        async def always_fails(_cfg):
+            attempts.append(1)
+            raise RuntimeError("the router rejected the restart request")
+
+        watchdog.reboot_router = always_fails
+        watchdog.launch_reboot_notice = lambda detail="": notices.append(detail)
+        watchdog.check_router_identity = lambda db, cfg: True
+        # The configuration is dry-run; rewrite it to execute so the failing
+        # reboot is actually reached.
+        config.write_text(config.read_text(encoding="utf-8").replace(
+            '"execution_mode": "dry-run"', '"execution_mode": "execute"'), encoding="utf-8")
+
+        def decide_execute():
+            space_runs(database)
+            elapse_cooldown(database)
+            assert call_main(config, ["--execute"]) in (0, 1)
+
+        for _ in range(3):
+            assert call_main(config, ["--execute"]) in (0, 1)
+        for _ in range(8):
+            decide_execute()
+
+        assert len(attempts) == 2, \
+            f"a failed restart must count against the bound: {len(attempts)} attempts for a bound of 2"
+        assert events(database, "Restart bound reached") == 1, \
+            "and the operator must be told the bound was reached"
+        gc.collect()
+finally:
+    watchdog.reboot_router = original_reboot_here
+    watchdog.launch_reboot_notice = original_notice_here
+    watchdog.check_router_identity = original_identity_here
+
+# A corrupt cooldown stamp must not wedge the monitor. Unguarded it raised after
+# the run row had already been written, so the watchdog exited 1 every cycle for
+# ever while the health monitor saw runs arriving on time and stayed green: a
+# wedged monitor that looks like a working one.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
+    database, config = build(temp, "dry-run", False, online=False)
+    watchdog.launch_reboot_notice = lambda detail="": None
+    for _ in range(3):
+        assert call_main(config) == 0
+    age_runs(database, [20, 12, 6])
+    db = watchdog.open_db(database)
+    watchdog.set_state(db, "last_reboot_attempt_utc", "not-a-timestamp")
+    db.commit(); db.close(); gc.collect()
+    assert call_main(config) == 0, "a corrupt cooldown stamp must not stop the run"
+    assert events(database, "Dry-run") == 1, \
+        "an unreadable stamp must read as an elapsed cooldown, not as a permanent one"
     gc.collect()
 
 # --- the router's identity ----------------------------------------------------

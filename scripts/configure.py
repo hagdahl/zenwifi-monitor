@@ -220,16 +220,18 @@ def initialise(args) -> int:
     port = args.management_port
     state = args.state_database or ask("Absolute path for the SQLite database: ")
     logs = args.log_directory or ask("Absolute local log directory: ")
-    # The model is not decoration: validate_config requires it, so a
-    # configuration written without one would be refused by the monitor at its
-    # first run. Better to ask now than to hand over a file that cannot work.
+    # Asked for because the router library selects behaviour by model and a
+    # configuration without one is a configuration somebody has to come back to.
+    # It is NOT required by validate_config, whatever this comment used to say:
+    # the watchdog suite's own valid fixture carries no model and passes. That
+    # claim survived into the operator-facing error below as well, and is A-13.
     model = args.router_model or ask("Router model: ")
     if not state or not logs:
         print("Both a database path and a log directory are required.", file=sys.stderr)
         return 2
     if not model:
-        print("A router model is required; the monitor's own validator rejects a "
-              "configuration without one.", file=sys.stderr)
+        print("A router model is required by this setup command, so the file it "
+              "writes is complete.", file=sys.stderr)
         return 2
 
     result = PROBE_TLS(host, port)
@@ -275,7 +277,15 @@ def initialise(args) -> int:
         # and the monitor's own validator rejects those. Absent means "not
         # recorded yet", and the first run that reaches the router records it.
         router["tls_fingerprint_sha256"] = fingerprint
-    else:
+    elif not use_tls:
+        # `not use_tls` and not merely "no fingerprint". The seventh review round
+        # found that this branch also caught a TLS install whose handshake
+        # completed but yielded no certificate bytes, and wrote the
+        # acknowledgement into a `use_tls: true` configuration. Flipping the flag
+        # to false by hand then passed the monitor's validator with no typed
+        # confirmation ever given — defeating, for the life of that install, the
+        # very guard the next line claims to set up.
+        #
         # The monitor refuses a plain-HTTP configuration unless this is present,
         # so the typed confirmation guards every later run and not only this one.
         router["insecure_http_acknowledged"] = True

@@ -95,6 +95,34 @@ asserts the same outcome, which is how "no event outlives the window, whatever
 the reason it is still here" is stated. `src/watchdog.py` now says that where a
 reader will meet it, rather than leaving the next reviewer to report it.
 
+## Corrected by the seventh review round, 3 August
+
+Published the same day, this document was reviewed within hours and two of its
+rows were shown to overclaim. Both are left in the table with this correction
+above them, because deleting them would hide the mistake the correction is
+about.
+
+**M-39 and M-65 quote assertions that call the health checks directly.**
+`04_tests/test_health.py` proved `check_router_certificate` and
+`check_run_lease` return the right code; nothing proved `evaluate()` calls
+them. Removing either from `evaluate`'s tuple left all nine suites green — so
+those two rows described pins on functions while the sweep's own framing is
+about behaviours. Both assertions now run through `evaluate()` as well, and
+both reversions are caught.
+
+**And the sweep missed three behaviours of exactly the shape it was looking
+for.** `main()` was never pinned to call `require_persistent_secret_store` or
+`validate_config`: delete either and every suite stayed green, which would put a
+monitoring run on any keyring backend, or make every floor in `validate_config`
+inert on the only path that matters. Neither was in the sixty-six rows. That is
+the same "correct function, unchecked join" shape as the identity check this
+document reports finding — listed once, and then not looked for systematically.
+
+The lesson is the one this document already states in its last section, now
+paid for twice: a sweep tests the properties somebody thought to name, and
+naming them is the part that fails. The seventh round's report is
+`01_docs/REVIEW_a6df698.md`.
+
 ## The full table
 
 Every row was executed. "Caught by" is the first suite to fail, in the fixed

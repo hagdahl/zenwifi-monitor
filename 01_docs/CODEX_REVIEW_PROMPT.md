@@ -8,8 +8,8 @@ one is written to be pasted into an agent that starts from nothing and has to
 fetch the code itself.
 
 Replace `<TARGET_COMMIT>` with the exact commit before starting. The last
-published commit that changed behaviour is `d1ab7c8`; anything after it is
-documentation, so review `d1ab7c8` unless code has landed since. Naming a
+published commit that changed behaviour is `90c7af4`, and the last that changed
+tests is `a6df698`; review `a6df698` unless something has landed since. Naming a
 moving head here would be a claim that goes stale the moment this file is
 committed.
 
@@ -46,9 +46,10 @@ WHAT THIS COMMIT RANGE CLAIMS
 Judge these claims. Do not take any of them on trust, and do not confine
 yourself to them.
 
-1. A restart requires observed evidence, not elapsed time: the most recent
-   successful run must be at least `monitor.failure_minutes_before_reboot` old
-   AND at least `monitor.required_failed_runs` failed runs must fall inside
+1. A restart requires observed evidence, not elapsed time: the oldest failed
+   run of the current outage must be at least
+   `monitor.failure_minutes_before_reboot` old AND at least
+   `monitor.required_failed_runs` failed runs must fall inside
    `monitor.failure_window_minutes`.
 2. Restarts are bounded: at most `monitor.max_restarts_per_window` decisions
    within `monitor.restart_window_hours`, counted since connectivity was last
@@ -64,6 +65,16 @@ yourself to them.
 6. The installed Debian code is owned by root and not writable by the account
    that ran the install.
 7. Every test in 04_tests/ fails if the behaviour it names is removed.
+8. A restart requires evidence from the CURRENT outage: both the elapsed
+   duration and the failed-run count are taken from runs after the most recent
+   successful one, and where no successful run has ever been recorded the
+   recency window is the whole of the constraint.
+9. Of sixty-six safety-relevant behaviours, sixty-four fail at least one suite
+   when reverted. The two that do not are documented in
+   01_docs/PIN_SWEEP_A17.md with the reason, and neither reason is "no test was
+   written". Judge that document as a claim, not as evidence: rerun the
+   reversions it lists that interest you most, especially the ones it says
+   changed nothing at all.
 
 WHAT TO LOOK FOR, roughly in order of how much it would cost to be wrong
 
@@ -71,19 +82,27 @@ WHAT TO LOOK FOR, roughly in order of how much it would cost to be wrong
    support, or prevent one that it does.
 2. Anything that could expose a credential, or weaken either gate.
 3. Tests that cannot fail, assert their own fixture, or promise more in their
-   name than their assertion delivers. Two previous rounds found several, so
-   treat every test as suspect until you have made it fail.
-4. Checks that observe the wrong moment — after the state they were meant to
+   name than their assertion delivers. Three previous rounds found several, and
+   the most recent found that a whole class of them had never been checked, so
+   treat every test as suspect until you have made it fail. The pins added since
+   are the ones most worth attacking, because they are the newest and were
+   written by the same hand that wrote the code.
+4. Conditions that look independent and share a domain. The last round's Blocker
+   was two clauses of one rule computed over different sets. Look for others.
+5. Behaviour that is tested as a function and never checked to be *called*. One
+   was found this way; the join between a correct function and the path that
+   should reach it is where this project keeps failing.
+6. Checks that observe the wrong moment — after the state they were meant to
    catch has already been overwritten, or before the thing that changes it has
    run. This project has produced that defect three separate times.
-5. Checks implemented by searching source text, which match their own
+7. Checks implemented by searching source text, which match their own
    explanatory comments. Also produced three times.
-6. Concurrency: two scheduled processes share one SQLite database and one
+8. Concurrency: two scheduled processes share one SQLite database and one
    exclusive run lease.
-7. Documentation, comments and commit messages that assert behaviour the code
+9. Documentation, comments and commit messages that assert behaviour the code
    does not have. Count this as a real finding, not a nicety.
-8. Anything unsafe to publish: secrets, private addresses, personal data, local
-   paths, machine names.
+10. Anything unsafe to publish: secrets, private addresses, personal data, local
+    paths, machine names.
 
 HOW TO WORK
 
@@ -122,7 +141,7 @@ REPORT
 2. Findings, ordered Blocker / High / Medium / Low. For each: file and line,
    what is wrong, the concrete failure it produces, whether you confirmed it by
    execution, and a specific remediation.
-3. The seven claims above, each marked upheld or not upheld, with the evidence
+3. The nine claims above, each marked upheld or not upheld, with the evidence
    that decided it.
 4. What you checked and found sound — briefly, but specifically enough that a
    reader can tell what was actually covered.

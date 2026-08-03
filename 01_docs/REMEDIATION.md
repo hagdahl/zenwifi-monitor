@@ -23,7 +23,7 @@ event text and in its notice. Fixing the staleness by quietly weakening the
 stated guarantee is not a fix. The proposal is therefore two conditions, both
 required:
 
-**Duration.** The most recent successful run is at least
+**Duration.** The oldest failed run of the current outage is at least
 `failure_minutes_before_reboot` old. This preserves the documented promise and
 is what breaks on flapping: a single successful run in between moves the
 reference point forward, which is correct, because flapping is not an outage.

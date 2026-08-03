@@ -270,6 +270,14 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     record("an absent fingerprint is omitted rather than written empty",
            written["router"].get("tls_fingerprint_sha256") is None,
            str(written["router"]))
+    # And the absence must not be mistaken for plain HTTP. The seventh review
+    # round found this exact path — TLS up, no certificate bytes — writing the
+    # insecure acknowledgement into a `use_tls: true` configuration, which is a
+    # pre-authorisation for cleartext credentials that no operator ever typed.
+    # The assertion above looked only at the fingerprint key and could not see it.
+    record("and a TLS configuration is never pre-authorised for plain HTTP",
+           written["router"].get("insecure_http_acknowledged") is None,
+           str(written["router"]))
 
     record("--accept-router-certificate is a dry run by default",
            certificate_module(target, fingerprint="c" * 64) == 0)

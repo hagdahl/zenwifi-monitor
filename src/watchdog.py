@@ -458,8 +458,15 @@ def outage_evidence(db, cfg: dict) -> dict:
     run and its connectivity result before the decision point. Two independent
     conditions, both required:
 
-    * duration — the most recent successful run is at least
-      `failure_minutes_before_reboot` old. This preserves the promise the notice
+    * duration — the oldest failed run of the current outage is at least
+      `failure_minutes_before_reboot` old. Not "the most recent successful run
+      is that old", which is what this said until the seventh review round and
+      is a weaker rule: after a monitoring gap the successful run can be an hour
+      behind while only two minutes of failure have actually been observed. The
+      stricter reading is the one the decision has always enforced and the one
+      ADR-023's stated goal — fifteen minutes of *observed* unavailability —
+      actually describes. Anyone "correcting" the code to match the old wording
+      would reintroduce a restart on evidence gathered before the gap. This preserves the promise the notice
       and the event text make, and it is what breaks on flapping: one successful
       run in between moves the reference forward, which is correct, because
       flapping is not an outage.
@@ -580,8 +587,17 @@ def restarts_this_episode(db, cfg: dict, evidence: dict) -> int:
     since = utc_text(utc_now() - timedelta(hours=window_hours))
     if evidence.get("last_online") and evidence["last_online"] > since:
         since = evidence["last_online"]
+    # 'Restart failed' counts. The seventh review round found it missing and
+    # confirmed the consequence by execution: with a reboot that raises, eight
+    # attempts were made against a bound of two, and no bound-reached warning was
+    # ever recorded, because a failed attempt was counted by nothing. That is the
+    # worst case of the three — a restart that fails is stronger evidence that
+    # restarting will not help than one that succeeds, and it submits the router
+    # credentials once per cooldown for the whole of the outage while the
+    # operator is told nothing. The bound is about attempts, not about successes.
     return db.execute(
-        "SELECT COUNT(*) FROM events WHERE action IN ('Router restarted', 'Dry-run') "
+        "SELECT COUNT(*) FROM events "
+        "WHERE action IN ('Router restarted', 'Restart failed', 'Dry-run') "
         "AND timestamp_utc > ?", (since,)).fetchone()[0]
 
 
@@ -796,7 +812,23 @@ def main() -> int:
         evidence = outage_evidence(db, cfg)
         if not restart_is_warranted(evidence, cfg): return 0
         last_attempt = get_state(db, "last_reboot_attempt_utc")
-        if last_attempt and utc_now() - datetime.fromisoformat(last_attempt) < timedelta(minutes=cfg["monitor"]["reboot_cooldown_minutes"]): return 0
+        # The only timestamp read in this file that used to have no parse guard.
+        # `outage_evidence`, the lease and the health monitor were all hardened
+        # against a corrupt value; this one was missed, and the seventh review
+        # round found it. Unguarded it raises after `log_run` has already written
+        # a fresh row, so the watchdog exits 1 on every cycle for ever while the
+        # health monitor sees runs arriving on time and stays green — a wedged
+        # monitor that looks like a working one. An unreadable stamp is treated
+        # as an elapsed cooldown, the same "fail towards being able to act"
+        # choice the lease makes, because the restart bound above is the thing
+        # that limits repetition and it does not depend on this value.
+        if last_attempt:
+            try:
+                elapsed = utc_now() - datetime.fromisoformat(last_attempt)
+            except (TypeError, ValueError):
+                elapsed = None
+            if elapsed is not None and elapsed < timedelta(minutes=cfg["monitor"]["reboot_cooldown_minutes"]):
+                return 0
         # The bound on repetition. An outage a restart cannot fix looks exactly
         # like one it can, so without this the router is restarted once per
         # cooldown for as long as an upstream fault lasts. Announced once per

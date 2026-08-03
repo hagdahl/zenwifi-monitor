@@ -591,6 +591,15 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     db.commit()
     record("a changed certificate is reported",
            codes(health.check_router_certificate(db, cfg)) == ["router-certificate-changed"])
+    # Through evaluate(), not only through the function. The seventh review round
+    # found that removing this check from evaluate()'s tuple left every suite
+    # green: the assertion above proves the helper returns a code, and the name
+    # promises that the monitor reports it. The health monitor is the only thing
+    # that puts a changed router certificate in front of an operator, so a
+    # disconnected check means a substituted endpoint is never escalated.
+    record("and the monitor actually reports it",
+           "router-certificate-changed" in codes(health.evaluate(db, cfg)),
+           f"codes={codes(health.evaluate(db, cfg))}")
     record("and the report names the command that resolves it",
            "--accept-router-certificate" in messages(health.check_router_certificate(db, cfg)))
 
@@ -608,6 +617,9 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp:
     health.set_state(db, "consecutive_skipped_runs", "3"); db.commit()
     record("repeated skipped runs are reported",
            codes(health.check_run_lease(db)) == ["runs-skipped"])
+    record("and the monitor actually reports those too",
+           "runs-skipped" in codes(health.evaluate(db, cfg)),
+           f"codes={codes(health.evaluate(db, cfg))}")
     health.set_state(db, "consecutive_skipped_runs", "0"); db.commit()
     record("and a run that proceeds clears it", health.check_run_lease(db) == [])
     db.close(); gc.collect()

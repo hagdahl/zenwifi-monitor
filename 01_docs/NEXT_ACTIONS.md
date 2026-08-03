@@ -3,22 +3,27 @@
 # Proposed next actions
 
 Every planned item in `01_docs/IMPROVEMENT_PLAN.md` is implemented and every
-finding from six independent review rounds is closed, except F6, which the
+finding from seven independent review rounds is closed, except F6, which the
 project owner accepted rather than engineered away. What follows is not a
 backlog of missing work; it is what a project in that state should do next.
 
 Identifiers are `A-nn` and are permanent. They do not collide with the review
-findings (`F1`–`F19`, which are defects) or the decision log (`ADR-001`
+findings (`F1`–`F25`, which are defects) or the decision log (`ADR-001`
 onwards). An action that is completed is marked done here and keeps its
 identifier, so a later document can refer to it without ambiguity.
 
-The sixth round is done, and it is the reason to keep doing them: it found a
-Blocker in the restart decision that five rounds and nine suites had passed
-over, and it found it in code written four days earlier to close a different
-Blocker. A-10 to A-13 came out of A-04, F18 and F19 out of A-01, and A-17 and
-A-18 out of what those two exposed about the tests and the tooling rather than
-about the product. That is what verification is for. The rest is a proposal for
-the owner to pick from, in whatever order he chooses.
+Two more rounds are done, and between them they are the argument for keeping
+this up. The sixth found a Blocker in the restart decision that five rounds and
+nine suites had passed over, in code written four days earlier to close a
+different Blocker. The seventh, run against the fix and against the sweep that
+followed it, found a High the sweep had missed and two more of exactly the shape
+the sweep says it was looking for — including one, the restart bound ignoring
+failed attempts, that had survived every round since the bound was written.
+A-10 to A-13 came out of A-04, F18 and F19 out of A-01, A-17 and A-18 out of
+what those exposed about the tests and the tooling, and F20 to F25 and A-19 to
+A-21 out of A-17 being checked rather than believed. That is what verification
+is for. The rest is a proposal for the owner to pick from, in whatever order he
+chooses.
 
 ## Summary
 
@@ -41,7 +46,16 @@ the owner to pick from, in whatever order he chooses.
 | A-10 | Find out why the bootstrap-log health check never fires | Not a defect | — | **Closed 3 Aug — the tool was wrong, not the code** |
 | A-11 | Stop the launcher suite writing to a real path | Defect | — | Proposed, consequence corrected |
 | A-12 | Record the router certificate at a calm moment, not before a restart | Design | — | Proposed |
-| A-13 | Correct the claim that `validate_config` requires `router.model` | Correction | — | Proposed |
+| A-13 | Correct the claim that `validate_config` requires `router.model` | Correction | — | **Done 3 Aug** |
+| F20 | The restart bound ignored failed attempts | Defect | — | **Closed 3 Aug** |
+| F21 | `main()` was unpinned for the credential store and for validation | Defect | — | **Closed 3 Aug** |
+| F22 | Two health checks were pinned as functions, never as findings | Defect | — | **Closed 3 Aug** |
+| F23 | The documented duration rule was not the implemented one | Correction | — | **Closed 3 Aug** |
+| F24 | `--init` could pre-authorise cleartext credentials | Defect | — | **Closed 3 Aug** |
+| F25 | An unguarded cooldown timestamp wedged the monitor for ever | Defect | — | **Closed 3 Aug** |
+| A-19 | Bound the `runs` table | Maintenance | — | Proposed |
+| A-20 | Stop the suites printing a verdict as a literal | Correction | — | Proposed |
+| A-21 | Deduplicate the certificate-changed event | Design | — | Proposed |
 | A-17 | Sweep every suite for pins that cannot fail | Assurance | — | **Done 3 Aug — 5 gaps found and closed** |
 | A-18 | Gate the structure of the decision log | Correction | — | Proposed |
 
@@ -283,6 +297,161 @@ to assert it makes no difference. Both are now stated in the code.
 **What it does not establish.** The list of behaviours was built by reading the
 modules, which is the same faculty that missed F18 for four days. A sweep can
 only test the properties somebody thought to name.
+
+## A-19. Bound the `runs` table
+
+**Why.** Events are bounded by `outbox.retention_days`; run rows are not. At the
+shipped five-minute cadence that is roughly 105,000 rows a year. Harmless for
+years and the only unbounded table in the schema, which is exactly the kind of
+thing that is noticed once and then never again. Found by the seventh round.
+
+**What.** Purge run rows past a retention window in `purge_events`, or a sibling
+of it — but keep at least as much history as the restart decision reads, which
+is `failure_window_minutes` and the restart window, so the bound must be defined
+in terms of those rather than picked.
+
+**Effort.** Small, with one trap: the decision reads this table.
+
+## A-20. Stop the suites printing a verdict as a literal
+
+**Why.** Four suites end by printing `"failures": 0, "result": "green"` as
+literal JSON regardless of what happened. They are correct today, because a
+failure raises before that line — but the text says something the program never
+computed, which is the class of claim this project treats as a defect when it
+appears in documentation. Found by the seventh round.
+
+**What.** Compute both from `results`.
+
+**Effort.** Trivial, in four files.
+
+## A-21. Deduplicate the certificate-changed event
+
+**Why.** `check_router_identity` logs `Router certificate changed` on every
+mismatch with no dedup. Materially reduced by the restart bound now counting
+failed attempts — the loop that produced one such event per cooldown for a whole
+outage is gone — but the event can still repeat once per restart attempt.
+
+**What.** Record the fingerprint that was reported, and log again only when it
+changes, the same shape as the restart bound's once-per-episode announcement.
+
+**Effort.** Small.
+
+## A-18. Gate the structure of the decision log
+
+**Why.** ADR-027 and ADR-028 were appended with the two characters `\n` instead
+of newlines, so both rendered inside ADR-027's last table cell and the file ended
+without a trailing newline. It survived a publication, a mirror, a leak scan and
+an independent review, because every one of those reads content and none of them
+reads shape. Written by this project's own tooling, which is the part worth
+fixing.
+
+**What.** Extend `scripts/check_versions.py`, or add a sibling, to assert that
+`00_admin/DECISIONS.md` is a well-formed table: one row per ADR, identifiers
+consecutive from ADR-001, no literal escape sequences, a trailing newline. The
+same check should reject a row whose cell count differs from the header's.
+
+**Effort.** Small, and it closes a class rather than an instance.
+
+## A-12. Record the router certificate at a calm moment, not before a restart
+
+**Severity: medium.** `check_router_identity` is called from exactly one place:
+immediately before the restart, which is where it belongs for *checking*. But it
+is also where the baseline is first *recorded*, and on this host
+`router_tls_fingerprint` is still unset after six days, because no restart has
+happened.
+
+Trust on first use is only worth anything if first use is a moment nobody chose.
+Establishing the baseline during an outage, in the seconds before the monitor
+sends the router password, is the least trustworthy moment available and the
+easiest for anybody positioned to arrange.
+
+`01_docs/USER_GUIDE.md` says an install that predates the feature "gains it
+automatically: the first run that reaches the router records what it sees". That
+is true and misleading, because the only run that reaches the router is one that
+is about to restart it.
+
+**Remedy.** Record the fingerprint on an ordinary successful run when none is
+stored — cheap, on a LAN, and it happens while nothing is wrong — and keep the
+comparison where it is. Then correct the guide.
+
+## A-13. Correct the claim that `validate_config` requires `router.model` — done 3 August
+
+`scripts/configure.py` asserted, in a comment and in an operator-facing error,
+that the monitor's validator rejects a configuration without `router.model`. It
+does not; the watchdog suite's own valid fixture carries no model and passes.
+Both now say what is true: the setup command requires it so the file it writes is
+complete. Raised by A-04, confirmed again by the seventh review round.
+
+## A-17. Sweep every suite for pins that cannot fail — done 3 August
+
+**Result: 64 of 66 reversions caught; 5 pins did not exist before and now do.**
+The full record is `01_docs/PIN_SWEEP_A17.md`, with every row executed rather
+than reasoned about.
+
+**The five gaps.** The router's identity check was never checked to be *called* —
+thorough coverage as a function, nothing asserting it was on the restart path,
+which is the same shape as F18. A secret could have come from the environment,
+which `src/_secrets.py` opens by ruling out: the systemd path was covered and the
+keyring path, where such a fallback would sit, was not. A changed bootstrap error
+log was never reported — the stamp was written and never compared, and this is
+the check A-10 spent a week vindicating. The run that announces an outage could
+also decide on it. And two concurrent runs could both take the lease, because
+every case took it from one process at a time, which is not what a lease is for.
+
+**Two survivors, neither a missing pin.** `BEGIN IMMEDIATE` reduced to `BEGIN`
+changes no observable outcome under the current pragmas — SQLite refuses a
+deferred read-to-write upgrade outright rather than waiting — so the honest
+record is that the line is unpinned and why, not a source-text check pretending
+otherwise. The launcher allowlist survives on Linux only because that half of
+the suite is skipped there; swept separately on Windows, it is caught at once.
+
+**Two reversions that changed nothing**, kept in the record because that is a
+finding about the code: a boolean is already excluded from `required_failed_runs`
+by the floor of two, and `purge_events` genuinely ignores two of its parameters —
+which are nonetheless load-bearing, because the outbox suite passes one both ways
+to assert it makes no difference. Both are now stated in the code.
+
+**What it does not establish.** The list of behaviours was built by reading the
+modules, which is the same faculty that missed F18 for four days. A sweep can
+only test the properties somebody thought to name.
+
+## A-19. Bound the `runs` table
+
+**Why.** Events are bounded by `outbox.retention_days`; run rows are not. At the
+shipped five-minute cadence that is roughly 105,000 rows a year. Harmless for
+years and the only unbounded table in the schema, which is exactly the kind of
+thing that is noticed once and then never again. Found by the seventh round.
+
+**What.** Purge run rows past a retention window in `purge_events`, or a sibling
+of it — but keep at least as much history as the restart decision reads, which
+is `failure_window_minutes` and the restart window, so the bound must be defined
+in terms of those rather than picked.
+
+**Effort.** Small, with one trap: the decision reads this table.
+
+## A-20. Stop the suites printing a verdict as a literal
+
+**Why.** Four suites end by printing `"failures": 0, "result": "green"` as
+literal JSON regardless of what happened. They are correct today, because a
+failure raises before that line — but the text says something the program never
+computed, which is the class of claim this project treats as a defect when it
+appears in documentation. Found by the seventh round.
+
+**What.** Compute both from `results`.
+
+**Effort.** Trivial, in four files.
+
+## A-21. Deduplicate the certificate-changed event
+
+**Why.** `check_router_identity` logs `Router certificate changed` on every
+mismatch with no dedup. Materially reduced by the restart bound now counting
+failed attempts — the loop that produced one such event per cooldown for a whole
+outage is gone — but the event can still repeat once per restart attempt.
+
+**What.** Record the fingerprint that was reported, and log again only when it
+changes, the same shape as the restart bound's once-per-episode announcement.
+
+**Effort.** Small.
 
 ## A-18. Gate the structure of the decision log
 
