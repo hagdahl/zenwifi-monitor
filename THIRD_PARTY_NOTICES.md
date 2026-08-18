@@ -21,7 +21,7 @@ communication. If a ZenWiFi Monitor distribution ever vendors, modifies, or
 redistributes `asusrouter` code, it must include the complete Apache-2.0
 license and the applicable upstream notice files with that distribution.
 
-## keyring 25.6.0
+## keyring 25.7.0
 
 - Upstream: <https://github.com/jaraco/keyring>
 - License: MIT License

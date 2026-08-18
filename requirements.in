@@ -4,4 +4,4 @@
 # Versions are pinned exactly because an unattended watchdog must not change
 # behaviour between two installs of the same commit.
 asusrouter==1.21.3
-keyring==25.6.0
+keyring==25.7.0

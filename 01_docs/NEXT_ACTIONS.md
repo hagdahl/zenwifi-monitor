@@ -32,7 +32,7 @@ chooses.
 | A-01 | Sixth independent review | Assurance | — | **Done 3 Aug — one Blocker, confirmed and fixed** |
 | F18 | Failures from an ended episode could authorise a restart | Defect | — | **Closed 3 Aug** |
 | F19 | The wrapper suite decoded Windows Script Host output blindly | Defect | — | **Closed 3 Aug, unreproduced here** |
-| A-02 | Upgrade `keyring` 25.6.0 → 25.7.0 | Maintenance | A-01 | Proposed |
+| A-02 | Upgrade `keyring` 25.6.0 → 25.7.0 | Maintenance | A-01 | **Done 17 Aug — `cryptography` 49.0.0 → 50.0.0 came with it; the live environment is not yet rebuilt** |
 | A-03 | Release 0.1.0 | Release | A-01, A-02 | Proposed |
 | A-04 | Verify and record the deployed state on the monitoring host | Assurance | — | **Done 3 Aug** |
 | A-05 | Restore the declared line endings on `scripts/Install.ps1` | Correction | — | **Done 3 Aug** |
@@ -58,6 +58,8 @@ chooses.
 | A-21 | Deduplicate the certificate-changed event | Design | — | Proposed |
 | A-17 | Sweep every suite for pins that cannot fail | Assurance | — | **Done 3 Aug — 5 gaps found and closed** |
 | A-18 | Gate the structure of the decision log | Correction | — | Proposed |
+| A-22 | Nothing checks the lock's versions, hashes, markers, or the notices file against it | Gap | — | Proposed |
+| A-23 | The dependency review keeps generating the overclaim ADR-030 corrected | Correction | — | Proposed |
 
 ## A-01. Sixth independent review — done 3 August
 
@@ -103,26 +105,59 @@ of it. Claims 2 to 6 were upheld by reading and by the tests that could run.
 correction with the same suites that missed the defect is the pattern this
 project has already been caught by twice.
 
-## A-02. Upgrade `keyring` 25.6.0 → 25.7.0
+## A-02. Upgrade `keyring` 25.6.0 → 25.7.0 — done 17 August
 
-**Why.** The dependency review's first real output, currently open as issue #1
-on the public repository. Running it once end to end is also what proves the
-loop built in `69121ac` actually works as a process rather than as a script.
+**Done 17 August 2026.** `keyring` 25.6.0 → 25.7.0 in `requirements.in`, and the
+regenerated lock moved `cryptography` 49.0.0 → 50.0.0 and `cffi` 2.1.0 → 2.1.1
+behind it. Twenty-seven distributions before and after; no environment marker
+changed. Recorded as ADR-030.
 
-**Steps.** Edit `requirements.in`; regenerate `requirements.lock.txt` with
-`uv pip compile requirements.in --universal --generate-hashes --python-version
-3.11 -o requirements.lock.txt`; reinstall with `--require-hashes` on both
-platforms; run all nine suites on both; commit; close the issue.
+**The `cryptography` move is the one that mattered, and it arrived on its own.**
+It is transitive and unpinned, so regenerating the lock reached the fixed release
+without anything being said about it in `requirements.in` — which is the resolver
+working as intended and is also why nobody would have noticed had it not moved.
+GHSA-g6cj-pr64-35w5 / PYSEC-2026-3552 affects 44.0.0–49.0.0 and is fixed in
+50.0.0.
 
-**Declining is a valid outcome.** If the release brings nothing this project
-needs, the honest action is to say so in the issue and leave the pin alone. What
-is not acceptable is letting it sit unanswered, because that is the failure mode
-the whole review exists to prevent.
+**What was established before the change, because both parts narrow the claim.**
+The lock carries `cryptography` under `sys_platform == 'linux'`, reached only
+through `keyring` → `SecretStorage`. The Windows host that runs the monitor and
+holds the router credentials never installed it. The CI runners did, and the
+Debian path would if it were ever run — it never has been. And `SecretStorage` 3.5.0 imports
+`cryptography.hazmat.primitives.ciphers` and `cryptography.hazmat.backends`, and
+nothing from `cryptography.hazmat.primitives.serialization.pkcs7`, so the
+affected functions were unreachable in this chain on any platform — the `pkcs7` in its D-Bus
+algorithm name `dh-ietf1024-sha256-aes128-cbc-pkcs7` is a padding scheme, which
+is a resemblance worth naming because this project has been caught by that class
+of near-match three times. Issue #1's line about the pin running in the process
+that holds the router credentials is true of the deployment that has never been
+run and false of the one that has.
 
-**Depends on A-01**, so a review does not have to be repeated against a moved
-dependency set.
+**What the reversions found is the more useful half.** Four mutations against
+pristine copies, all nine suites against each, one control that changed nothing.
+Only removing `keyring` from the lock by name is caught. Putting the vulnerable
+`cryptography` back, making `requirements.in` and the lock disagree on a version,
+and stripping every `--hash=` line each leave all nine suites green: the suite
+compares the two files by distribution name and never by version or hash. The
+hash gate is `pip install --require-hashes` in both CI jobs, observed to reject
+the stripped lock; the vulnerability gate is the weekly review of ADR-028. The
+third has no gate at all, and is **A-22**.
 
-**Effort.** An hour, most of it running suites.
+**What is deliberately not done.** A-02's own steps said "reinstall with
+`--require-hashes` on both platforms". The Linux side was a fresh environment
+built for the purpose; the Windows side was a **throwaway** environment, since
+deleted. The live environment at `%LOCALAPPDATA%\ZenWiFiMonitor\.venv` still
+holds `keyring` 25.6.0 — measured, not assumed — and rebuilding it with
+`Install.ps1 -InstallDependencies` is an operational step the owner takes
+deliberately. Nothing waits on it: the distribution that moved for security
+reasons was never installable on Windows under the lock's markers, and the one
+that is carries no advisory. **This paragraph exists because the first version of
+this record implied the live host had been upgraded**, which an independent
+review caught before the commit; the qualification from A-10 applies as always,
+in that a reading of `%LOCALAPPDATA%` through a remote shell is that shell's view
+and not the scheduled jobs'.
+
+**Effort.** An hour, most of it running suites — as estimated.
 
 ## A-03. Release 0.1.0
 
@@ -687,5 +722,77 @@ well not be worth it.
 **This is a decision, not an implementation.** Recording the choice again, with
 whatever has been learned since ADR-021, is the action. Reaffirming the
 acceptance is a complete answer.
+
+## A-22. Nothing checks the lock's versions, hashes, markers, or the notices file against it
+
+**Why.** `04_tests/test_dependencies.py` asserts `set(direct) <= set(locked)` —
+distribution names, not versions. Measured during A-02: `requirements.in` saying
+`keyring==25.7.0` while `requirements.lock.txt` says 25.6.0 leaves all nine
+suites green, and so does stripping every `--hash=` line from the lock. Neither
+is hypothetical; both were run.
+
+**Why it is not urgent.** The hash property is enforced where it is used, by
+`pip install --require-hashes` in both CI jobs, and a lock that disagrees with
+its input is most likely to arise from a hand edit — which the lock's own header
+already forbids and which the header cannot enforce. The realistic failure is a
+regeneration that was started and not finished.
+
+**Two more of the same shape, added by the independent review of A-02.**
+**Environment markers are load-bearing and ungated.** The whole argument that the
+Windows host never installed the vulnerable `cryptography` rests on one marker,
+`sys_platform == 'linux'`, in one line of the lock. No suite reads a marker, and
+none of A-02's four mutations touched one — so a regeneration that lost or
+loosened a marker would put `cryptography`, `cffi` and `secretstorage` on the
+monitoring host with all nine suites green and nothing but a human reading a diff
+to notice. **And `THIRD_PARTY_NOTICES.md` is ungated too**: its version headings
+can be reverted to a stale pin with everything still green, while the file's own
+maintenance rule says they must follow the lock.
+
+**What.** Assert in `04_tests/test_dependencies.py` that every direct pin's
+version equals the locked version for the same distribution; that every locked
+distribution carries at least one `--hash=`; that every locked distribution's
+environment marker is byte-identical to a recorded expectation, so a marker
+cannot change without the change being stated; and that every version named by a
+heading in `THIRD_PARTY_NOTICES.md` matches the lock. All four are properties of
+files this suite already parses.
+
+**Revert-check.** The reversions are the four mutations that motivated each
+assertion — version drift, stripped hashes, a dropped marker, a stale notices
+heading — and each must be observed to fail the assertion it motivates, with a
+control that changes nothing staying green.
+
+**Effort.** An hour and a half. The marker assertion is the fiddly one, because
+a recorded expectation that nobody updates deliberately becomes a rubber stamp;
+prefer failing on any marker change and requiring the change to be acknowledged.
+
+## A-23. The dependency review keeps generating the overclaim ADR-030 corrected
+
+**Why.** ADR-030 corrects issue #1's sentence that a vulnerable transitive pin
+"runs in the process that holds the router credentials" — true of a deployment
+that has never been run, false of the one that has. But that sentence is not
+something a person wrote into the issue: `describe()` in
+`scripts/check_dependencies.py` emits it, the module docstring says the same
+thing, and ADR-028's rationale repeats it. **Every issue the weekly workflow
+files from now on will restate the claim ADR-030 just corrected.** Found by the
+independent review of A-02, which is exactly the kind of thing a second reader
+sees and the author does not, because the author is looking at the correction
+rather than at where the wrong sentence comes from.
+
+**Why it was not fixed in A-02.** Editing the review tool inside a security
+upgrade mixes two changes and hides the one that matters — the same reasoning
+that put A-22 here rather than in that commit. What A-02 owed was to record it,
+which is this.
+
+**What.** Qualify the generated text and the docstring so they say what is true
+of every deployment: a vulnerable transitive dependency is installed wherever its
+environment markers admit it, and the platforms this project supports do not all
+install the same set. Correct ADR-028's rationale in place with the correction
+stated, the way ADR-023 and ADR-027 were corrected — not quietly rewritten.
+
+**Revert-check.** `04_tests/test_dependencies.py` already asserts on the text
+`describe()` produces; the new wording needs an assertion that fails if the
+unqualified claim returns.
+
+**Effort.** Half an hour, most of it on the ADR-028 wording.
 
 <!-- END-OF-FILE: NEXT_ACTIONS.md -->
